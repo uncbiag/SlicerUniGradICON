@@ -445,9 +445,9 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
         finetune_steps= None if generalSettings["io_steps"] == 0 else generalSettings["io_steps"],
     )
    
-    itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.h5')
+    itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.tfm')
     node_reference = outputSettings['transform']
-    transform_node = slicer.util.loadTransform(f'{slicer.app.temporaryPath}/transform.h5')
+    transform_node = slicer.util.loadTransform(f'{slicer.app.temporaryPath}/transform.tfm')
     
     #get name of node_reference
     nodeName = node_reference.GetName()
