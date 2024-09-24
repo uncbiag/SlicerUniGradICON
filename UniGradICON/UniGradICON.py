@@ -5,212 +5,19 @@ from slicer.util import VTKObservationMixin
 
 import json
 import glob
-import itk
 import os
 import numpy as np
 
 input_shape = [1, 1, 175, 175, 175]
 
-class GradientICONSparse(network_wrappers.RegistrationModule):
-    def __init__(self, network, similarity, lmbda, device="cuda"):
-
-        super().__init__()
-
-        self.regis_net = network
-        self.lmbda = lmbda
-        self.similarity = similarity
-        self.device = device
-
-    def forward(self, image_A, image_B):
-
-        assert self.identity_map.shape[2:] == image_A.shape[2:]
-        assert self.identity_map.shape[2:] == image_B.shape[2:]
-
-        # Tag used elsewhere for optimization.
-        # Must be set at beginning of forward b/c not preserved by .cuda() etc
-        self.identity_map.isIdentity = True
-
-        self.phi_AB = self.regis_net(image_A, image_B)
-        self.phi_BA = self.regis_net(image_B, image_A)
-
-        self.phi_AB_vectorfield = self.phi_AB(self.identity_map)
-        self.phi_BA_vectorfield = self.phi_BA(self.identity_map)
-
-        # tag images during warping so that the similarity measure
-        # can use information about whether a sample is interpolated
-        # or extrapolated
-
-        if getattr(self.similarity, "isInterpolated", False):
-            # tag images during warping so that the similarity measure
-            # can use information about whether a sample is interpolated
-            # or extrapolated
-            inbounds_tag = torch.zeros([image_A.shape[0]] + [1] + list(image_A.shape[2:]), device=image_A.device)
-            if len(self.input_shape) - 2 == 3:
-                inbounds_tag[:, :, 1:-1, 1:-1, 1:-1] = 1.0
-            elif len(self.input_shape) - 2 == 2:
-                inbounds_tag[:, :, 1:-1, 1:-1] = 1.0
-            else:
-                inbounds_tag[:, :, 1:-1] = 1.0
-        else:
-            inbounds_tag = None
-
-        self.warped_image_A = compute_warped_image_multiNC(
-            torch.cat([image_A, inbounds_tag], axis=1) if inbounds_tag is not None else image_A,
-            self.phi_AB_vectorfield,
-            self.spacing,
-            1,
-            zero_boundary=True
-        )
-        self.warped_image_B = compute_warped_image_multiNC(
-            torch.cat([image_B, inbounds_tag], axis=1) if inbounds_tag is not None else image_B,
-            self.phi_BA_vectorfield,
-            self.spacing,
-            1,
-            zero_boundary=True
-        )
-
-        similarity_loss = self.similarity(
-            self.warped_image_A, image_B
-        ) + self.similarity(self.warped_image_B, image_A)
-
-        if len(self.input_shape) - 2 == 3:
-            Iepsilon = (
-                self.identity_map
-                + 2 * torch.randn(*self.identity_map.shape).to(self.device)
-                / self.identity_map.shape[-1]
-            )[:, :, ::2, ::2, ::2]
-        elif len(self.input_shape) - 2 == 2:
-            Iepsilon = (
-                self.identity_map
-                + 2 * torch.randn(*self.identity_map.shape).to(self.device)
-                / self.identity_map.shape[-1]
-            )[:, :, ::2, ::2]
-
-        # compute squared Frobenius of Jacobian of icon error
-
-        direction_losses = []
-
-        approximate_Iepsilon = self.phi_AB(self.phi_BA(Iepsilon))
-
-        inverse_consistency_error = Iepsilon - approximate_Iepsilon
-
-        delta = 0.001
-
-        if len(self.identity_map.shape) == 4:
-            dx = torch.tensor([[[[delta]], [[0.0]]]]).to(self.device)
-            dy = torch.tensor([[[[0.0]], [[delta]]]]).to(self.device)
-            direction_vectors = (dx, dy)
-
-        elif len(self.identity_map.shape) == 5:
-            dx = torch.tensor([[[[[delta]]], [[[0.0]]], [[[0.0]]]]]).to(self.device)
-            dy = torch.tensor([[[[[0.0]]], [[[delta]]], [[[0.0]]]]]).to(self.device)
-            dz = torch.tensor([[[[0.0]]], [[[0.0]]], [[[delta]]]]).to(self.device)
-            direction_vectors = (dx, dy, dz)
-        elif len(self.identity_map.shape) == 3:
-            dx = torch.tensor([[[delta]]]).to(self.device)
-            direction_vectors = (dx,)
-
-        for d in direction_vectors:
-            approximate_Iepsilon_d = self.phi_AB(self.phi_BA(Iepsilon + d))
-            inverse_consistency_error_d = Iepsilon + d - approximate_Iepsilon_d
-            grad_d_icon_error = (
-                inverse_consistency_error - inverse_consistency_error_d
-            ) / delta
-            direction_losses.append(torch.mean(grad_d_icon_error**2))
-
-        inverse_consistency_loss = sum(direction_losses)
-
-        all_loss = self.lmbda * inverse_consistency_loss + similarity_loss
-
-        transform_magnitude = torch.mean(
-            (self.identity_map - self.phi_AB_vectorfield) ** 2
-        )
-        return icon.losses.ICONLoss(
-            all_loss,
-            inverse_consistency_loss,
-            similarity_loss,
-            transform_magnitude,
-            icon.losses.flips(self.phi_BA_vectorfield),
-        )
-
-    def clean(self):
-        del self.phi_AB, self.phi_BA, self.phi_AB_vectorfield, self.phi_BA_vectorfield, self.warped_image_A, self.warped_image_B
-
-def make_network(input_shape, include_last_step=False, lmbda=1.5, loss_fn=icon.LNCC(sigma=5), device = "cuda"):
-    dimension = len(input_shape) - 2
-    inner_net = icon.FunctionFromVectorField(networks.tallUNet2(dimension=dimension))
-
-    for _ in range(2):
-        inner_net = icon.TwoStepRegistration(
-            icon.DownsampleRegistration(inner_net, dimension=dimension),
-            icon.FunctionFromVectorField(networks.tallUNet2(dimension=dimension))
-        )
-    if include_last_step:
-        inner_net = icon.TwoStepRegistration(inner_net, icon.FunctionFromVectorField(networks.tallUNet2(dimension=dimension)))
-
-    net = GradientICONSparse(inner_net, loss_fn, lmbda=lmbda, device=device)
-    net.assign_identity_map(input_shape)
-    return net
-
-def make_sim(similarity):
-    if similarity == "LNCC":
-        return icon.LNCC(sigma=5)
-    elif similarity == "Squared LNCC":
-        return icon. SquaredLNCC(sigma=5)
-    elif similarity == "MIND-SSC":
-        return icon.MINDSSC(radius=2, dilation=2)
-    else:
-        raise ValueError(f"Similarity measure {similarity} not recognized. Choose from [lncc, lncc2, mind].")
-
-def quantile(arr: torch.Tensor, q):
-    arr = arr.flatten()
-    l = len(arr)
-    return torch.kthvalue(arr, int(q * l)).values
-
-def apply_mask(image, segmentation):
-    segmentation_cast_filter = itk.CastImageFilter[type(segmentation),
-                                            itk.Image.F3].New()
-    segmentation_cast_filter.SetInput(segmentation)
-    segmentation_cast_filter.Update()
-    segmentation = segmentation_cast_filter.GetOutput()
-    mask_filter = itk.MultiplyImageFilter[itk.Image.F3, itk.Image.F3,
-                                    itk.Image.F3].New()
-
-    mask_filter.SetInput1(image)
-    mask_filter.SetInput2(segmentation)
-    mask_filter.Update()
-
-    return mask_filter.GetOutput()
-
-def preprocess(image, modality="ct", segmentation=None):
-    if modality == "CT/CBCT":
-        min_ = -1000
-        max_ = 1000
-        image = itk.CastImageFilter[type(image), itk.Image[itk.F, 3]].New()(image)
-        image = itk.clamp_image_filter(image, Bounds=(-1000, 1000))
-    elif modality == "MRI":
-        image = itk.CastImageFilter[type(image), itk.Image[itk.F, 3]].New()(image)
-        min_, _ = itk.image_intensity_min_max(image)
-        max_ = quantile(torch.tensor(np.array(image)), .99).item()
-        image = itk.clamp_image_filter(image, Bounds=(min_, max_))
-    else:
-        raise ValueError(f"{modality} not recognized. Use 'ct' or 'mri'.")
-
-    image = itk.shift_scale_image_filter(image, shift=-min_, scale = 1/(max_-min_)) 
-
-    if segmentation is not None:
-        image = apply_mask(image, segmentation)
-    return image
-
-
-class unigradicon(ScriptedLoadableModule):
+class UniGradICON(ScriptedLoadableModule):
   """Uses ScriptedLoadableModule base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
 
   def __init__(self, parent):
     ScriptedLoadableModule.__init__(self, parent)
-    self.parent.title = "unigradicon"
+    self.parent.title = "UniGradICON"
     self.parent.categories = ["Registration"]
     self.parent.dependencies = []
     self.parent.contributors = ["Basar Demir"]
@@ -223,7 +30,7 @@ class unigradicon(ScriptedLoadableModule):
 # unigradiconWidget
 #
 
-class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
+class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
   """Uses ScriptedLoadableModuleWidget base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
   """
@@ -250,11 +57,13 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     global compute_warped_image_multiNC
     global itk_wrapper
     global SampleData
-    global device
+    global icon_helper
     
     import numpy as np
     import sitkUtils
     import SampleData
+    import shutil
+    
 
     if not os.path.exists(self.checkpointFolder):
       os.makedirs(self.checkpointFolder)
@@ -266,7 +75,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
               
       weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch", "unigradicon_weights.trch")
       if self.sampleDataLogic.downloadPercent and self.sampleDataLogic.downloadPercent == 100:
-        os.rename(weights_location, self.checkpointFolder + "unigradicon_weights.pth")
+        shutil.copyfile(weights_location, self.checkpointFolder + "unigradicon_weights.pth")
         slicer.progressWindow.close()
     
     if not os.path.exists(self.checkpointFolder + "multigradicon_weights.pth"):
@@ -275,14 +84,14 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       self.sampleDataLogic.logMessage = self.reportProgress
       weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/multigradicon_weights/Step_2_final.trch", "Step_2_final.trch")
       if self.sampleDataLogic.downloadPercent and self.sampleDataLogic.downloadPercent == 100:
-        os.rename(weights_location, self.checkpointFolder + "multigradicon_weights.pth")
+        shutil.copyfile(weights_location, self.checkpointFolder + "multigradicon_weights.pth")
         slicer.progressWindow.close()
     
     try:
       import icon_registration
     except ModuleNotFoundError:
       if slicer.util.confirmOkCancelDisplay(
-      "'icon_registration' is missing. Click OK to install it now!"
+      "'icon_registration' is missing. Click OK to install it."
       ): 
         slicer.util.pip_install("icon_registration")
     try:
@@ -293,6 +102,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       import icon_registration.itk_wrapper as itk_wrapper
       import itk
       import torch
+      import icon_helper
     except ModuleNotFoundError:
       raise RuntimeError("There is a problem about the installation of 'hydra' package. Please try again to install!")
     
@@ -300,7 +110,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       import SimpleITK
     except ModuleNotFoundError:
       if slicer.util.confirmOkCancelDisplay(
-      "'SimpleITK' is missing. Click OK to install it now!"
+      "'SimpleITK' is missing. Click OK to install it."
       ): 
         slicer.util.pip_install("SimpleITK")
     try:
@@ -325,7 +135,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # Load widget from .ui file (created by Qt Designer).
     # Additional widgets can be instantiated manually and added to self.layout.
-    uiWidget = slicer.util.loadUI(self.resourcePath('UI/unigradicon.ui'))
+    uiWidget = slicer.util.loadUI(self.resourcePath('UI/UniGradICON.ui'))
     self.layout.addWidget(uiWidget)
     self.ui = slicer.util.childWidgetVariables(uiWidget)
     
@@ -336,7 +146,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # Create logic class. Logic implements all computations that should be possible to run
     # in batch mode, without a graphical user interface.
-    self.logic = unigradiconLogic(self.checkpointFolder)
+    self.logic = UniGradICONLogic(self.checkpointFolder)
 
     self.ui.stagesPresetsComboBox.addItems(PresetManager().getPresetNames())
     # Connections
@@ -519,7 +329,7 @@ class unigradiconWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 # unigradiconLogic
 #
 
-class unigradiconLogic(ScriptedLoadableModuleLogic):
+class UniGradICONLogic(ScriptedLoadableModuleLogic):
   """This class should implement all the actual
   computation done by your module.  The interface
   should be such that other python code can import
@@ -542,9 +352,9 @@ class unigradiconLogic(ScriptedLoadableModuleLogic):
     ScriptedLoadableModuleLogic.__init__(self)
     self.weights_location = weights_location
     self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    
-    self.model = make_network(input_shape, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=self.device)
-    self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=torch.device("cpu")))
+    print(self.device)
+    self.model = icon_helper.make_network(input_shape, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=self.device)
+    self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device))
     self.model.to(self.device)
     
 
@@ -602,7 +412,7 @@ class unigradiconLogic(ScriptedLoadableModuleLogic):
     if presetParameters['modelSettings']['model'] == 'multigradicon':
       self.model.regis_net.load_state_dict(torch.load(self.weights_location + "multigradicon_weights.pth", map_location=self.device))
     
-    self.model.similarity = make_sim(presetParameters['modelSettings']['loss'])
+    self.model.similarity = icon_helper.make_sim(presetParameters['modelSettings']['loss'])
     
     self.model.to(self.device)
     self.model.eval()
@@ -628,10 +438,10 @@ class unigradiconLogic(ScriptedLoadableModuleLogic):
     moving = self.sitk2itk(moving_image)
     
     #convert to itk by preserving metadata
-    phi_AB, _ = itk_wrapper.register_pair(
+    phi_AB, _ = icon_helper.register_pair(
         self.model,
-        preprocess(moving, moving_image_modality), 
-        preprocess(fixed, fixed_image_modality), 
+        icon_helper.preprocess(moving, moving_image_modality), 
+        icon_helper.preprocess(fixed, fixed_image_modality), 
         finetune_steps= None if generalSettings["io_steps"] == 0 else generalSettings["io_steps"],
     )
    
@@ -702,7 +512,7 @@ class PresetManager:
 # unigradiconTest
 #
 
-class unigradiconTest(ScriptedLoadableModuleTest):
+class UniGradICONTest(ScriptedLoadableModuleTest):
   """
   This is the test case for your scripted module.
   Uses ScriptedLoadableModuleTest base class, available at:
@@ -718,9 +528,9 @@ class unigradiconTest(ScriptedLoadableModuleTest):
     """Run as few or as many tests as needed here.
     """
     self.setUp()
-    self.test_unigradicon()
+    self.test_UniGradICON()
 
-  def test_unigradicon(self):
+  def test_UniGradICON(self):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
     (both valid and invalid).  At higher levels your tests should emulate the
@@ -743,7 +553,7 @@ class unigradiconTest(ScriptedLoadableModuleTest):
 
     outputVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
 
-    logic = unigradiconLogic()
+    logic = UniGradICONLogic()
     presetParameters = PresetManager().getPresetParametersByName('QuickSyN')
 
     presetParameters['outputSettings']['volume'] = outputVolume

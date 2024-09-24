@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-set(MODULE_NAME unigradicon)
+set(MODULE_NAME UniGradICON)
 
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
@@ -10,6 +10,12 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   Resources/UI/${MODULE_NAME}.ui
   )
+
+set(EXTENSION_HOMEPAGE "https://github.com/uncbiag/SlicerUniGradICON")
+set(EXTENSION_CATEGORY "Registration")
+set(EXTENSION_CONTRIBUTORS "Basar Demir")
+set(EXTENSION_DESCRIPTION "This module performs registration of medical images using uniGradICON or multiGradICON.")
+set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------
 slicerMacroBuildScriptedModule(
