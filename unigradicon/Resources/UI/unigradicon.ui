@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>antsRegistration</class>
+ <widget class="qMRMLWidget" name="antsRegistration">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>460</width>
+    <height>955</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="ctkCollapsibleButton" name="InputsCollapsibleButton">
+     <property name="text">
+      <string>Inputs</string>
+     </property>
+     <property name="collapsed">
+      <bool>false</bool>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_2">
+      <item row="2" column="0">
+       <widget class="QLabel" name="label_12">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="text">
+         <string>Moving Image: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_11">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="text">
+         <string>Fixed Image: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="qMRMLNodeComboBox" name="movingImageNodeComboBox">
+        <property name="toolTip">
+         <string>This will set the selected Image as moving for the first metric of all stages.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist>
+          <string>vtkMRMLScalarVolumeNode</string>
+         </stringlist>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="2">
+       <widget class="QComboBox" name="movingModalityComboBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select an interpolation to generate the output transformed volume.</string>
+        </property>
+        <property name="editable">
+         <bool>false</bool>
+        </property>
+        <item>
+         <property name="text">
+          <string>MRI</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>CT/CBCT</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="fixedImageNodeComboBox">
+        <property name="toolTip">
+         <string>This will set the selected Image as fixed for the first metric of all stages.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist>
+          <string>vtkMRMLScalarVolumeNode</string>
+         </stringlist>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="editEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QComboBox" name="fixedModalityComboBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select an interpolation to generate the output transformed volume.</string>
+        </property>
+        <property name="editable">
+         <bool>false</bool>
+        </property>
+        <item>
+         <property name="text">
+          <string>MRI</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>CT/CBCT</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="generalSettingsCollapsibleButton">
+     <property name="text">
+      <string>Settings</string>
+     </property>
+     <property name="collapsed">
+      <bool>false</bool>
+     </property>
+     <property name="flat">
+      <bool>false</bool>
+     </property>
+     <layout class="QFormLayout" name="formLayout_3">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_15">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="text">
+         <string>Model: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="stagesPresetsComboBox">
+        <property name="toolTip">
+         <string>Set registration stages from preset. Settings can be modified under the Stages (Advanced) tab.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0" colspan="2">
+       <widget class="QPushButton" name="runRegistrationButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string/>
+        </property>
+        <property name="text">
+         <string>Run Registration</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_4">
+        <property name="text">
+         <string>Similarity Loss: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="lossComboBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select an interpolation to generate the output transformed volume.</string>
+        </property>
+        <property name="editable">
+         <bool>false</bool>
+        </property>
+        <item>
+         <property name="text">
+          <string>LNCC</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Squared LNCC</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>MIND-SSC</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QSpinBox" name="ioSpinBox">
+        <property name="toolTip">
+         <string>This option sets number of instance optimzation steps.</string>
+        </property>
+        <property name="minimum">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>1000</number>
+        </property>
+        <property name="value">
+         <number>0</number>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="label">
+        <property name="text">
+         <string>IO Steps: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0" colspan="2">
+       <widget class="ctkCollapsibleButton" name="outputsCollapsibleButton">
+        <property name="text">
+         <string>Outputs</string>
+        </property>
+        <property name="collapsed">
+         <bool>false</bool>
+        </property>
+        <layout class="QFormLayout" name="formLayout_4">
+         <item row="0" column="0">
+          <widget class="QLabel" name="label_13">
+           <property name="text">
+            <string>Transform: </string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="qMRMLNodeComboBox" name="outputTransformComboBox">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="toolTip">
+            <string>Select output transform. Choosing a Grid Transform Node will force a grid output. In this case, the fixed node from the first metric will be used as grid reference.</string>
+           </property>
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLTransformNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="renameEnabled">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="label_2">
+           <property name="text">
+            <string>Transformed Volume:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="qMRMLNodeComboBox" name="outputVolumeComboBox">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="toolTip">
+            <string/>
+           </property>
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLScalarVolumeNode</string>
+            </stringlist>
+           </property>
+           <property name="showChildNodeTypes">
+            <bool>false</bool>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="renameEnabled">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>80</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLNodeComboBox</class>
+   <extends>QWidget</extends>
+   <header>qMRMLNodeComboBox.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLWidget</class>
+   <extends>QWidget</extends>
+   <header>qMRMLWidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>antsRegistration</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>outputVolumeComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>82</x>
+     <y>135</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>220</x>
+     <y>161</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>antsRegistration</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>outputTransformComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>218</x>
+     <y>477</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>274</x>
+     <y>320</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>antsRegistration</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>fixedImageNodeComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>218</x>
+     <y>477</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>255</x>
+     <y>18</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>antsRegistration</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>movingImageNodeComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>218</x>
+     <y>477</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>259</x>
+     <y>44</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>

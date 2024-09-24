@@ -1,0 +1,13 @@
+{   
+    "image": {
+        "modality-fixed": "mri",
+        "modality-moving": "ct",
+        "fixed": null,
+        "moving": null
+    },
+    "modelSettings": {
+        "model": "multigradicon",
+        "loss": "Squared LNCC",
+        "io_steps": "0"
+    }
+}
