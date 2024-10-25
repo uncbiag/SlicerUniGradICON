@@ -8,6 +8,7 @@
     "modelSettings": {
         "model": "multigradicon",
         "loss": "Squared LNCC",
-        "io_steps": "0"
+        "io_steps": "0",
+        "device": "cpu"
     }
 }

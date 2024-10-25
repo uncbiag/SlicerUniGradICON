@@ -8,6 +8,7 @@
     "modelSettings": {
         "model": "unigradicon",
         "loss": "LNCC",
-        "io_steps": "0"
+        "io_steps": "0",
+        "device": "cpu"
     }
 }

@@ -161,6 +161,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self.ui.outputTransformComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
     self.ui.outputVolumeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
     self.ui.ioSpinBox.connect("valueChanged(int)", self.updateParameterNodeFromGUI)
+    self.ui.deviceComboBox.connect("currentIndexChanged(int)", self.updateParameterNodeFromGUI)
 
     self.ui.fixedImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateStagesFromFixedMovingNodes)
     self.ui.movingImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateStagesFromFixedMovingNodes)
@@ -173,7 +174,11 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # Buttons
     self.ui.runRegistrationButton.connect('clicked(bool)', self.onRunRegistrationButton)
-
+    
+    # Add GPU option if available
+    if torch.cuda.is_available():
+      self.ui.deviceComboBox.addItem("GPU")
+      
     # Make sure parameter node is initialized (needed for module reload)
     self.initializeParameterNode()
   def cleanup(self):
@@ -257,7 +262,8 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self.ui.outputTransformComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_TRANSFORM_REF))
     self.ui.outputVolumeComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_VOLUME_REF))
     self.ui.lossComboBox.currentText = self._parameterNode.GetParameter(self.logic.LOSS_PARAM)
-
+    self.ui.deviceComboBox.currentText = self._parameterNode.GetParameter(self.logic.DEVICE_PARAM)
+    
     self.ui.ioSpinBox.value = int(self._parameterNode.GetParameter(self.logic.IO_PARAM))
 
     self.ui.runRegistrationButton.enabled = self.ui.fixedImageNodeComboBox.currentNodeID and self.ui.movingImageNodeComboBox.currentNodeID and\
@@ -287,6 +293,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self._parameterNode.SetNodeReferenceID(self.logic.OUTPUT_VOLUME_REF, self.ui.outputVolumeComboBox.currentNodeID)
     self._parameterNode.SetParameter(self.logic.LOSS_PARAM, self.ui.lossComboBox.currentText)
     self._parameterNode.SetParameter(self.logic.IO_PARAM, str(self.ui.ioSpinBox.value))
+    self._parameterNode.SetParameter(self.logic.DEVICE_PARAM, self.ui.deviceComboBox.currentText)
 
     self._parameterNode.EndModify(wasModified)
 
@@ -344,6 +351,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
   LOSS_PARAM = "LNCC"
   STAGES_JSON_PARAM = "StagesJson"
   IO_PARAM = "0"
+  DEVICE_PARAM = "CPU"
 
   def __init__(self, weights_location):
     """
@@ -351,7 +359,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     """
     ScriptedLoadableModuleLogic.__init__(self)
     self.weights_location = weights_location
-    self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    self.device = torch.device("cpu")
     print(self.device)
     self.model = icon_helper.make_network(input_shape, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=self.device)
     self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device))
@@ -373,6 +381,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       parameterNode.SetParameter(self.LOSS_PARAM, str(presetParameters["modelSettings"]["loss"]))
     if not parameterNode.GetParameter(self.IO_PARAM):
       parameterNode.SetParameter(self.IO_PARAM, str(presetParameters["modelSettings"]["io_steps"]))
+    if not parameterNode.GetParameter(self.DEVICE_PARAM):
+      parameterNode.SetParameter(self.DEVICE_PARAM, str(presetParameters["modelSettings"]["device"]))
 
   def createProcessParameters(self, paramNode):
     parameters = json.loads(paramNode.GetParameter(self.STAGES_JSON_PARAM))
@@ -384,7 +394,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
 
     parameters['generalSettings'] = {}
     parameters['generalSettings']['io_steps'] = int(paramNode.GetParameter(self.IO_PARAM))
-
+    parameters['generalSettings']['device'] = str(paramNode.GetParameter(self.DEVICE_PARAM))
+    
     return parameters
 
   def itk2sitk(self, itk_image):
@@ -413,8 +424,6 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       self.model.regis_net.load_state_dict(torch.load(self.weights_location + "multigradicon_weights.pth", map_location=self.device))
     
     self.model.similarity = icon_helper.make_sim(presetParameters['modelSettings']['loss'])
-    
-    self.model.to(self.device)
     self.model.eval()
 
   def process(self, image, outputSettings, modelSettings=None, generalSettings=None, wait_for_completion=False):
@@ -436,6 +445,11 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     #convert to itk
     fixed = self.sitk2itk(fixed_image)
     moving = self.sitk2itk(moving_image)
+    
+    if generalSettings['device'] == 'GPU':
+      self.model.cuda()
+    else:
+      self.model.cpu()
     
     #convert to itk by preserving metadata
     phi_AB, _ = icon_helper.register_pair(

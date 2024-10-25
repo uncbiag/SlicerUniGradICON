@@ -58,11 +58,31 @@ Then, build the extension using the Slicer Extension Wizard which can be found u
     
    For multimodal registration tasks, we recommend using the Squared LNCC or MIND - SSC similarity loss. Note that if IO steps are set to 0, the selected similarity loss function will not be applied.
 
-5. Finally, the user can select the output transform and transformed image. These will be saved under the specified names in the Slicer scene.
+5. The user can select the device that model will be run on. The available options are:
+    - CPU
+    - GPU (CUDA)
+    
+    If GPU is selected, the extension will use the GPU for the optimization process. Note that the GPU option is only available if the user has a CUDA-compatible GPU. Also, there are some limitations on the GPU memory usage. The peak memory usage of the model is as follows:
 
-6. After selecting all necessary parameters, the user can click the "Run Registration" button to initiate the registration process. The extension will perform the task using the selected model and parameters. Depending on the selected parameters and CUDA availability, the process may take a few minutes.
+    - `w/o Instance Optimization`: 3364.0 MB
+    - `w/ Instance Optimization using LNCC`: 11446.0 MB
+    - `w/ Instance Optimization using Squared LNCC`: 11490.0 MB
+    - `w/ Instance Optimization using MIND-SSC`: 14814.0 MB
+  
+    Please make sure that your GPU has enough memory to run the model. If the GPU memory is not sufficient, prefer using the CPU option.
 
-7. The user can visualize the registration results by selecting the output transform and transformed image under the "Data" module. Also, we recommend using the "CheckerBoard Filter" module to compare the registration result with the fixed image.
+6. Finally, the user can select the output transform and transformed image. These will be saved under the specified names in the Slicer scene.
+
+7. After selecting all necessary parameters, the user can click the "Run Registration" button to initiate the registration process. The extension will perform the task using the selected model and parameters. Depending on the selected parameters and CUDA availability, the process may take a few minutes.
+
+8. The user can visualize the registration results by selecting the output transform and transformed image under the "Data" module. Also, we recommend using the "CheckerBoard Filter" module to compare the registration result with the fixed image.
+
+## TroubleShooting
+Here are some common issues that may arise during the installation and use of the extension, along with their solutions:
+
+- On first use, the extension downloads the required PyTorch libraries. This installation may take a few minutes, and it is normal for the Slice interface to appear frozen during this process. Please wait until the installation is complete. You can monitor the progress in the Slicer Python Console.
+
+- The I/O process takes approximately one second per iteration on a GPU. Please be patient during the optimization process, particularly when using a CPU.
 
 ## Acknowledgements
 This implementation is based on the [SlicerANTs](https://github.com/netstim/SlicerANTs) and [SlicerSegmentWithSAM](https://github.com/mazurowski-lab/SlicerSegmentWithSAM) repositories. We thank the authors for their work.

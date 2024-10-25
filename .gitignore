@@ -1,0 +1,4 @@
+UniGradICON/__pycache__/
+model_checkpoints/
+build/
+.DS_Store
