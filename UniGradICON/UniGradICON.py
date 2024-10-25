@@ -543,7 +543,113 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
     """
     self.setUp()
     self.test_UniGradICON()
+    
+    
+  def test_wo_IO(self):
+    parameters = {}
 
+    parameters['image'] = {}
+    parameters['image']['fixed'] = self.fixed
+    parameters['image']['moving'] = self.moving
+    
+    parameters['image']['modality-fixed'] = 'MRI'
+    parameters['image']['modality-moving'] = 'MRI'
+    
+    parameters['outputSettings'] = {}
+    parameters['outputSettings']['transform'] = self.outputTransform
+    parameters['outputSettings']['volume'] = self.outputVolume
+    parameters['outputSettings']['loss'] = 'LNCC'
+    
+    parameters['generalSettings'] = {}
+    parameters['generalSettings']['io_steps'] = int(0)
+    parameters['generalSettings']['device'] = str('CPU')
+    
+    return parameters
+  
+  def test_w_LNCC(self):
+    parameters = {}
+
+    parameters['image'] = {}
+    parameters['image']['fixed'] = self.fixed
+    parameters['image']['moving'] = self.moving
+    
+    parameters['image']['modality-fixed'] = 'MRI'
+    parameters['image']['modality-moving'] = 'MRI'
+    
+    parameters['outputSettings'] = {}
+    parameters['outputSettings']['transform'] = self.outputTransform
+    parameters['outputSettings']['volume'] = self.outputVolume
+    parameters['outputSettings']['loss'] = 'LNCC'
+    
+    parameters['generalSettings'] = {}
+    parameters['generalSettings']['io_steps'] = int(1)
+    parameters['generalSettings']['device'] = str('CPU')
+    
+    return parameters
+  
+  def test_w_SquaredLNCC(self):
+    parameters = {}
+
+    parameters['image'] = {}
+    parameters['image']['fixed'] = self.fixed
+    parameters['image']['moving'] = self.moving
+    
+    parameters['image']['modality-fixed'] = 'MRI'
+    parameters['image']['modality-moving'] = 'MRI'
+    
+    parameters['outputSettings'] = {}
+    parameters['outputSettings']['transform'] = self.outputTransform
+    parameters['outputSettings']['volume'] = self.outputVolume
+    parameters['outputSettings']['loss'] = 'SquaredLNCC'
+    
+    parameters['generalSettings'] = {}
+    parameters['generalSettings']['io_steps'] = int(1)
+    parameters['generalSettings']['device'] = str('CPU')
+    
+    return parameters
+  
+  def test_w_MINDSSC(self):
+    parameters = {}
+
+    parameters['image'] = {}
+    parameters['image']['fixed'] = self.fixed
+    parameters['image']['moving'] = self.moving
+    
+    parameters['image']['modality-fixed'] = 'MRI'
+    parameters['image']['modality-moving'] = 'MRI'
+    
+    parameters['outputSettings'] = {}
+    parameters['outputSettings']['transform'] = self.outputTransform
+    parameters['outputSettings']['volume'] = self.outputVolume
+    parameters['outputSettings']['loss'] = 'MINDSSC'
+    
+    parameters['generalSettings'] = {}
+    parameters['generalSettings']['io_steps'] = int(1)
+    parameters['generalSettings']['device'] = str('CPU')
+    
+    return parameters
+  
+  def test_GPU(self):
+    parameters = {}
+
+    parameters['image'] = {}
+    parameters['image']['fixed'] = self.fixed
+    parameters['image']['moving'] = self.moving
+    
+    parameters['image']['modality-fixed'] = 'MRI'
+    parameters['image']['modality-moving'] = 'MRI'
+    
+    parameters['outputSettings'] = {}
+    parameters['outputSettings']['transform'] = self.outputTransform
+    parameters['outputSettings']['volume'] = self.outputVolume
+    parameters['outputSettings']['loss'] = 'LNCC'
+    
+    parameters['generalSettings'] = {}
+    parameters['generalSettings']['io_steps'] = 0
+    parameters['generalSettings']['device'] = str('GPU')
+    
+    return parameters
+  
   def test_UniGradICON(self):
     """ Ideally you should have several levels of tests.  At the lowest level
     tests should exercise the functionality of the logic with different inputs
@@ -558,25 +664,39 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
 
     self.delayDisplay("Starting the test")
 
-    # Get/create input data
-
     import SampleData
     sampleDataLogic = SampleData.SampleDataLogic()
-    fixed = sampleDataLogic.downloadMRBrainTumor1()
-    moving = sampleDataLogic.downloadMRBrainTumor2()
+    self.fixed = sampleDataLogic.downloadMRBrainTumor1()
+    self.moving = sampleDataLogic.downloadMRBrainTumor2()
 
-    outputVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
+    self.outputVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
+    self.outputTransform = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLTransformNode')
+    
+    self.sampleDataLogic = SampleData.SampleDataLogic()
+    weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch", "unigradicon_weights.pth")
+    
+    logic = UniGradICONLogic(weights_location.split("unigradicon_weights.pth")[0])
+    
 
-    logic = UniGradICONLogic()
-    presetParameters = PresetManager().getPresetParametersByName('QuickSyN')
-
-    presetParameters['outputSettings']['volume'] = outputVolume
-    presetParameters['outputSettings']['transform'] = None
-    presetParameters['outputSettings']['log'] = None
-    logic.process(**presetParameters)
-
-    logic.cliNode.AddObserver('ModifiedEvent', self.onProcessingStatusUpdate)
-
-  def onProcessingStatusUpdate(self, caller, event):
-    if caller.GetStatus() & caller.Completed:
-      self.delayDisplay('Test passed!')
+    parameters = self.test_wo_IO()
+    logic.process(**parameters)
+    print("w/o IO test passed!")
+    
+    parameters = self.test_w_LNCC()
+    logic.process(**parameters)
+    print("w/ LNCC test passed!")
+    
+    parameters = self.test_w_SquaredLNCC()
+    logic.process(**parameters)
+    print("w/ SquaredLNCC test passed!")
+    
+    parameters = self.test_w_MINDSSC()
+    logic.process(**parameters)
+    print("w/ MINDSSC test passed!")
+    
+    if torch.cuda.is_available():
+      parameters = self.test_GPU()
+      logic.process(**parameters)
+      print("w/ GPU test passed!")
+    
+    self.delayDisplay('Test passed!')
