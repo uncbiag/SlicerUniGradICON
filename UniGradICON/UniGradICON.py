@@ -332,10 +332,12 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     parameters = self.logic.createProcessParameters(self._parameterNode)
     self.logic.process(**parameters)
 
+    #show message box
+    slicer.util.infoDisplay("Registration is completed!")
+    
 #
 # unigradiconLogic
 #
-
 class UniGradICONLogic(ScriptedLoadableModuleLogic):
   """This class should implement all the actual
   computation done by your module.  The interface
