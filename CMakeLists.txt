@@ -6,8 +6,10 @@ project(UniGradICON)
 # Extension meta-information
 set(EXTENSION_HOMEPAGE "https://github.com/uncbiag/SlicerUniGradICON")
 set(EXTENSION_CATEGORY "Registration")
-set(EXTENSION_CONTRIBUTORS "Basar Demir (UNC)")
-set(EXTENSION_DESCRIPTION "This module performs registration of medical images using uniGradICON or multiGradICON.")
+set(EXTENSION_CONTRIBUTORS "Basar Demir (University of North Carolina at Chapel Hill), Lin Tian (University of North Carolina at Chapel Hill), Hastings Greer (University of North Carolina at Chapel Hill), Marc Niethammer (University of North Carolina at Chapel Hill)")
+set(EXTENSION_DESCRIPTION "This module performs medical image registration using the family of foundational GradICON deep registration models.")
+set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/interface.png https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/brain_example.png https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/knee_example.png")
+set(EXTENSION_ICONURL "https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/UniGradICON/Resources/Icons/UniGradICON.png")
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------
