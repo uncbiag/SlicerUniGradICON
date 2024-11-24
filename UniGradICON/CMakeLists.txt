@@ -17,7 +17,7 @@ set(EXTENSION_CONTRIBUTORS "Basar Demir (University of North Carolina at Chapel 
 set(EXTENSION_DESCRIPTION "This module performs medical image registration using the family of foundational GradICON deep registration models.")
 set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/interface.png https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/brain_example.png https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/screenshots/knee_example.png")
 set(EXTENSION_ICONURL "https://raw.githubusercontent.com/uncbiag/SlicerUniGradICON/main/UniGradICON/Resources/Icons/UniGradICON.png")
-set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
+set(EXTENSION_DEPENDS "PyTorch") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------
 slicerMacroBuildScriptedModule(

@@ -7,6 +7,8 @@ import itk
 import torch
 import numpy as np
 import torch.nn.functional as F
+import copy
+from tqdm import tqdm
 
 class GradientICONSparse(network_wrappers.RegistrationModule):
     def __init__(self, network, similarity, lmbda, device="cuda"):
@@ -26,7 +28,9 @@ class GradientICONSparse(network_wrappers.RegistrationModule):
         # Tag used elsewhere for optimization.
         # Must be set at beginning of forward b/c not preserved by .cuda() etc
         self.identity_map.isIdentity = True
-
+        image_A = image_A.to(self.device)
+        image_B = image_B.to(self.device)
+        
         self.phi_AB = self.regis_net(image_A, image_B)
         self.phi_BA = self.regis_net(image_B, image_A)
 
@@ -198,10 +202,31 @@ def preprocess(image, modality="ct", segmentation=None):
     if segmentation is not None:
         image = apply_mask(image, segmentation)
     return image
+
+def finetune_execute(model, image_A, image_B, steps, call_back=None):
+    state_dict = copy.deepcopy(model.state_dict())
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.00002)
     
+    with tqdm(range(steps)) as t:
+        for step in t:
+            if call_back:
+                elapsed = t.format_dict['elapsed']
+                rate = t.format_dict["rate"]
+                remaining = (t.total - t.n) / rate if rate and t.total else 0  # Seconds*
+                call_back(steps, step, elapsed, remaining)
+            optimizer.zero_grad()
+            loss_tuple = model(image_A, image_B)
+            loss_tuple[0].backward()
+            optimizer.step()
+
+
+    with torch.no_grad():
+        loss = model(image_A, image_B)
+    model.load_state_dict(state_dict)
+    return loss
     
 def register_pair(
-    model, image_A, image_B, finetune_steps=None, return_artifacts=False
+    model, image_A, image_B, finetune_steps=None, call_back=None
 ) -> "(itk.CompositeTransform, itk.CompositeTransform)":
 
     assert isinstance(image_A, itk.Image)
@@ -234,7 +259,7 @@ def register_pair(
         with torch.no_grad():
             loss = model(A_resized, B_resized)
     else:
-        loss = itk_wrapper.finetune_execute(model, A_resized, B_resized, finetune_steps)
+        loss = finetune_execute(model, A_resized, B_resized, finetune_steps, call_back)
 
     # phi_AB and phi_BA are [1, 3, H, W, D] pytorch tensors representing the forward and backward
     # maps computed by the model
@@ -250,4 +275,3 @@ def register_pair(
         itk_wrapper.create_itk_transform(phi_BA, model.identity_map, image_B, image_A),
     )
     return itk_transforms
-

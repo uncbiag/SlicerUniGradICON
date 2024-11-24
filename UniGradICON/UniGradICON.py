@@ -7,9 +7,11 @@ import json
 import glob
 import os
 import numpy as np
+import SimpleITK as sitk
+import logging
 
 input_shape = [1, 1, 175, 175, 175]
-
+  
 class UniGradICON(ScriptedLoadableModule):
   """Uses ScriptedLoadableModule base class, available at:
   https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
@@ -19,7 +21,7 @@ class UniGradICON(ScriptedLoadableModule):
     ScriptedLoadableModule.__init__(self, parent)
     self.parent.title = "UniGradICON"
     self.parent.categories = ["Registration"]
-    self.parent.dependencies = []
+    self.parent.dependencies = ["PyTorch"]
     self.parent.contributors = ["Basar Demir (University of North Carolina at Chapel Hill), Lin Tian (University of North Carolina at Chapel Hill), Hastings Greer (University of North Carolina at Chapel Hill), Marc Niethammer (University of North Carolina at Chapel Hill)"]
     self.parent.helpText = """
     This module performs medical image registration using the family of foundational GradICON deep registration models. For more information, visit the <a href="https://github.com/uncbiag/uniGradICON">uniGradICON</a> repository.
@@ -87,12 +89,33 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         shutil.copyfile(weights_location, self.checkpointFolder + "multigradicon_weights.pth")
         slicer.progressWindow.close()
     
+    # Install PyTorch
+    try:
+      import PyTorchUtils
+    except ModuleNotFoundError as e:
+      raise RuntimeError("This module requires PyTorch extension. Install it from the Extensions Manager.")
+
+    minimumTorchVersion = "1.12"
+    torchLogic = PyTorchUtils.PyTorchUtilsLogic()
+    if not torchLogic.torchInstalled():
+        print('PyTorch Python package is required. Installing... (it may take several minutes)')
+        torch = torchLogic.installTorch(askConfirmation=True, torchVersionRequirement = f">={minimumTorchVersion}")
+        if torch is None:
+            raise RuntimeError("This module requires PyTorch extension. Install it from the Extensions Manager.")
+    else:
+        # torch is installed, check version
+        from packaging import version
+        if version.parse(torchLogic.torch.__version__) < version.parse(minimumTorchVersion):
+            raise RuntimeError(f'PyTorch version {torchLogic.torch.__version__} is not compatible with this module.'
+                              + f' Minimum required version is {minimumTorchVersion}. You can use "PyTorch Util" module to install PyTorch'
+                              + f' with version requirement set to: >={minimumTorchVersion}')
+    import torch
+    import torch.nn.functional as F
+    import copy
     try:
       import icon_registration
     except ModuleNotFoundError:
-      if slicer.util.confirmOkCancelDisplay(
-      "'icon_registration' is missing. Click OK to install it."
-      ): 
+      if slicer.util.confirmOkCancelDisplay("'icon_registration' is missing. Click OK to install it."): 
         slicer.util.pip_install("icon_registration")
     try:
       import icon_registration as icon
@@ -101,23 +124,10 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       from icon_registration.mermaidlite import compute_warped_image_multiNC
       import icon_registration.itk_wrapper as itk_wrapper
       import itk
-      import torch
-      import icon_helper
+      import helpers.icon_helper as icon_helper
     except ModuleNotFoundError:
-      raise RuntimeError("There is a problem about the installation of 'hydra' package. Please try again to install!")
+      raise RuntimeError("There is a problem about the installation of 'icon' package. Please try again to install!")
     
-    try:
-      import SimpleITK
-    except ModuleNotFoundError:
-      if slicer.util.confirmOkCancelDisplay(
-      "'SimpleITK' is missing. Click OK to install it."
-      ): 
-        slicer.util.pip_install("SimpleITK")
-    try:
-      import SimpleITK as sitk
-    except ModuleNotFoundError:
-      raise RuntimeError("There is a problem about the installation of 'SimpleITK' package. Please try again to install!")
-
   def reportProgress(self, msg, level=None):
     if slicer.progressWindow.wasCanceled:
         raise Exception("Download aborted")
@@ -174,6 +184,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # Buttons
     self.ui.runRegistrationButton.connect('clicked(bool)', self.onRunRegistrationButton)
+    
+    self.ui.progressBar.hide()
+    self.ui.time.hide()
     
     # Add GPU option if available
     if torch.cuda.is_available():
@@ -310,6 +323,19 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
   
     self._parameterNode.SetParameter(self.logic.STAGES_JSON_PARAM, json.dumps(presetParameters))
 
+  def updateProgress(self, allProgress, currentProgress, elapsedTime=None, remainingTime=None):
+    self.ui.progressBar.maximum = allProgress
+    self.ui.progressBar.value = currentProgress-1
+    self.ui.progressBar.show()
+    
+    if elapsedTime is not None and remainingTime is not None:
+      self.ui.time.text = f"Elapsed Time: {elapsedTime:.2f}s Remaining Time: {remainingTime:.2f}s"
+      self.ui.time.show()
+    else:
+      self.ui.time.hide()
+    if allProgress == currentProgress:
+      self.ui.progressBar.hide()
+      
   def onPresetSelected(self, presetName):
     if presetName == 'Select...' or self._parameterNode is None or self._updatingGUIFromParameterNode:
       return
@@ -330,7 +356,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       return
 
     parameters = self.logic.createProcessParameters(self._parameterNode)
-    self.logic.process(**parameters)
+    self.logic.process(**parameters, call_back=self.updateProgress)
 
     #show message box
     slicer.util.infoDisplay("Registration is completed!")
@@ -364,7 +390,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     self.device = torch.device("cpu")
     print(self.device)
     self.model = icon_helper.make_network(input_shape, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=self.device)
-    self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device))
+    self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device, weights_only=True))
     self.model.to(self.device)
     
 
@@ -385,7 +411,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       parameterNode.SetParameter(self.IO_PARAM, str(presetParameters["modelSettings"]["io_steps"]))
     if not parameterNode.GetParameter(self.DEVICE_PARAM):
       parameterNode.SetParameter(self.DEVICE_PARAM, str(presetParameters["modelSettings"]["device"]))
-
+      
   def createProcessParameters(self, paramNode):
     parameters = json.loads(paramNode.GetParameter(self.STAGES_JSON_PARAM))
 
@@ -421,14 +447,15 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
   
   def changeModelSettings(self, presetParameters):
     if presetParameters['modelSettings']['model'] == 'unigradicon':
-      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device))
+      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device, weights_only=True))
     if presetParameters['modelSettings']['model'] == 'multigradicon':
-      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "multigradicon_weights.pth", map_location=self.device))
+      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "multigradicon_weights.pth", map_location=self.device, weights_only=True))
     
     self.model.similarity = icon_helper.make_sim(presetParameters['modelSettings']['loss'])
     self.model.eval()
 
-  def process(self, image, outputSettings, modelSettings=None, generalSettings=None, wait_for_completion=False):
+
+  def process(self, image, outputSettings, modelSettings=None, generalSettings=None, wait_for_completion=False, call_back=None):
     """
     :param stages: list defining registration stages
     :param outputSettings: dictionary defining output settings
@@ -450,25 +477,29 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     
     if generalSettings['device'] == 'GPU':
       self.model.cuda()
+      self.model.device = 'cuda'
     else:
       self.model.cpu()
+      self.model.device = 'cpu'
     
+    if generalSettings["io_steps"] != 0:
+      call_back(generalSettings["io_steps"], 0)
     #convert to itk by preserving metadata
     phi_AB, _ = icon_helper.register_pair(
         self.model,
         icon_helper.preprocess(moving, moving_image_modality), 
         icon_helper.preprocess(fixed, fixed_image_modality), 
         finetune_steps= None if generalSettings["io_steps"] == 0 else generalSettings["io_steps"],
+        call_back = call_back
     )
-   
-    itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.tfm')
-    node_reference = outputSettings['transform']
-    transform_node = slicer.util.loadTransform(f'{slicer.app.temporaryPath}/transform.tfm')
+    call_back(generalSettings["io_steps"], generalSettings["io_steps"])
     
-    #get name of node_reference
-    nodeName = node_reference.GetName()
-    slicer.mrmlScene.RemoveNode(node_reference)
-    transform_node.SetName(nodeName)
+    itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.tfm')
+    
+    transformNode = outputSettings['transform']
+    storageNode = transformNode.CreateDefaultStorageNode()
+    storageNode.SetFileName(f'{slicer.app.temporaryPath}/transform.tfm')
+    storageNode.ReadData(transformNode)
 
     moving = itk.CastImageFilter[type(moving), itk.Image[itk.F, 3]].New()(moving)
     interpolator = itk.LinearInterpolateImageFunction.New(moving)
@@ -483,11 +514,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     outputVolumeNode = outputSettings['volume']
     outputVolumeNode.CreateDefaultDisplayNodes()
     sitkUtils.PushVolumeToSlicer(self.itk2sitk(warped_moving_image), outputVolumeNode)
-    
-#
-# Preset Manager
-#
-
+  
+  
 class PresetManager:
   def __init__(self):
       self.presetPath = os.path.join(os.path.dirname(__file__), 'Resources', 'Presets')
@@ -523,11 +551,9 @@ class PresetManager:
     G = glob.glob(os.path.join(self.presetPath, '*.json'))
     return [os.path.splitext(os.path.basename(g))[0] for g in G]
 
-
 #
 # unigradiconTest
 #
-
 class UniGradICONTest(ScriptedLoadableModuleTest):
   """
   This is the test case for your scripted module.
@@ -679,26 +705,31 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
     
     logic = UniGradICONLogic(weights_location.split("unigradicon_weights.pth")[0])
     
-
-    parameters = self.test_wo_IO()
-    logic.process(**parameters)
-    print("w/o IO test passed!")
+    # Logic testing is disabled by default to not overload automatic build machines.
+    testLogic = False
     
-    parameters = self.test_w_LNCC()
-    logic.process(**parameters)
-    print("w/ LNCC test passed!")
-    
-    parameters = self.test_w_SquaredLNCC()
-    logic.process(**parameters)
-    print("w/ SquaredLNCC test passed!")
-    
-    parameters = self.test_w_MINDSSC()
-    logic.process(**parameters)
-    print("w/ MINDSSC test passed!")
-    
-    if torch.cuda.is_available():
-      parameters = self.test_GPU()
+    if testLogic:
+      parameters = self.test_wo_IO()
       logic.process(**parameters)
-      print("w/ GPU test passed!")
-    
-    self.delayDisplay('Test passed!')
+      print("w/o IO test passed!")
+      
+      parameters = self.test_w_LNCC()
+      logic.process(**parameters)
+      print("w/ LNCC test passed!")
+      
+      parameters = self.test_w_SquaredLNCC()
+      logic.process(**parameters)
+      print("w/ SquaredLNCC test passed!")
+      
+      parameters = self.test_w_MINDSSC()
+      logic.process(**parameters)
+      print("w/ MINDSSC test passed!")
+      
+      if torch.cuda.is_available():
+        parameters = self.test_GPU()
+        logic.process(**parameters)
+        print("w/ GPU test passed!")
+      
+      self.delayDisplay('Test passed!')
+    else:
+      logging.log(logging.warning, 'Tests was skipped. Enable it by setting testLogic variable to True.') 
