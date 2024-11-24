@@ -21,7 +21,7 @@ class UniGradICON(ScriptedLoadableModule):
     ScriptedLoadableModule.__init__(self, parent)
     self.parent.title = "UniGradICON"
     self.parent.categories = ["Registration"]
-    self.parent.dependencies = ["PyTorch"]
+    self.parent.dependencies = []
     self.parent.contributors = ["Basar Demir (University of North Carolina at Chapel Hill), Lin Tian (University of North Carolina at Chapel Hill), Hastings Greer (University of North Carolina at Chapel Hill), Marc Niethammer (University of North Carolina at Chapel Hill)"]
     self.parent.helpText = """
     This module performs medical image registration using the family of foundational GradICON deep registration models. For more information, visit the <a href="https://github.com/uncbiag/uniGradICON">uniGradICON</a> repository.
