@@ -482,7 +482,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       self.model.cpu()
       self.model.device = 'cpu'
     
-    if generalSettings["io_steps"] != 0:
+    if generalSettings["io_steps"] != 0 and call_back is not None:
       call_back(generalSettings["io_steps"], 0)
     #convert to itk by preserving metadata
     phi_AB, _ = icon_helper.register_pair(
@@ -492,7 +492,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
         finetune_steps= None if generalSettings["io_steps"] == 0 else generalSettings["io_steps"],
         call_back = call_back
     )
-    call_back(generalSettings["io_steps"], generalSettings["io_steps"])
+    if generalSettings["io_steps"] != 0 and call_back is not None:
+      call_back(generalSettings["io_steps"], generalSettings["io_steps"])
     
     itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.tfm')
     
