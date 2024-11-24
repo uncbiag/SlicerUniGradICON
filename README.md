@@ -32,12 +32,14 @@ Please (currently) cite as:
 
 ## Installation
 
-To install the extension, clone this repository using the following command:
+This extension depends on Pytorch Slicer extension. If it is not installed, please install it from Extension Manager by simply searching for "Pytorch".
+
+To install the uniGradICON extension, clone this repository using the following command:
 ```
 git clone https://github.com/uncbiag/SlicerUniGradICON.git
 ```
 
-Then, build the extension using the Slicer Extension Wizard which can be found under Modules -> Developer Tools -> Extension Wizard. Click on the "Select extension" button and select the cloned repository folder. It will automatically detect the extension and it will be appear under the Modules -> Registration menu.
+Then, drag and drop the cloned repository folder into the Slicer window and click "OK" to install the extension. After the installation is done, the extension will appear under the Modules -> Registration menu.
 
 ## User Guide
 
@@ -49,7 +51,7 @@ Then, build the extension using the Slicer Extension Wizard which can be found u
 
 2. The extension provides two models: `uniGradICON` and `multiGradICON`. Both models have the same interface and can be used to perform image registration tasks. The user can select the desired model from a drop-down menu.
 
-3. Additionally, the user can specify the number of iterations for the optimization (IO steps) process. The default value is set to 0 iterations. However, we recommend using at least 50 iterations for more challenging registration tasks.
+3. Additionally, the user can specify the number of iterations for the instance optimization (IO steps) process. The default value is set to 0 iterations. However, we recommend using at least 50 iterations for more challenging registration tasks.
 
 4. The user can also select the similarity loss function that will be used during the optimization process. The available similarity losses are:
     - Localized Normalized Cross-Correlation (LNCC)
@@ -83,6 +85,7 @@ Here are some common issues that may arise during the installation and use of th
 - On first use, the extension downloads the required PyTorch libraries. This installation may take a few minutes, and it is normal for the Slice interface to appear frozen during this process. Please wait until the installation is complete. You can monitor the progress in the Slicer Python Console.
 
 - The I/O process takes approximately one second per iteration on a GPU. Please be patient during the optimization process, particularly when using a CPU.
+- If an error arises due to incompatibility between `setuptools` and `distutils`, update `setuptools` using the following command in the Slicer Python Console: `slicer.util.pip_install("setuptools -U")`
 
 ## Acknowledgements
 This implementation is based on the [SlicerANTs](https://github.com/netstim/SlicerANTs) and [SlicerSegmentWithSAM](https://github.com/mazurowski-lab/SlicerSegmentWithSAM) repositories. We thank the authors for their work.
