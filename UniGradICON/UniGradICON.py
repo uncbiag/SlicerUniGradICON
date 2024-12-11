@@ -124,7 +124,7 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
       from icon_registration.mermaidlite import compute_warped_image_multiNC
       import icon_registration.itk_wrapper as itk_wrapper
       import itk
-      import helpers.icon_helper as icon_helper
+      import UniGradICONHelpers.icon_helper as icon_helper
     except ModuleNotFoundError:
       raise RuntimeError("There is a problem about the installation of 'icon' package. Please try again to install!")
     
