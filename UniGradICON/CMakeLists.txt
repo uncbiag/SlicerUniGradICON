@@ -4,10 +4,14 @@ set(MODULE_NAME UniGradICON)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
+  UniGradICONHelpers/__init__.py
+  UniGradICONHelpers/icon_helper.py
   )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
+  Resources/Presets/multigradicon.json
+  Resources/Presets/unigradicon.json
   Resources/UI/${MODULE_NAME}.ui
   )
 
