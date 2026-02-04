@@ -28,6 +28,37 @@ class UniGradICON(ScriptedLoadableModule):
     """
     self.parent.acknowledgementText = ""
 
+
+def _checkPyTorchNumPyCompatibility():
+  """Check if PyTorch can be imported with the current NumPy version.
+
+  Some PyTorch versions compiled against NumPy 1.x fail to import when
+  NumPy 2.x is installed due to C API changes. This function detects
+  that specific error and downgrades NumPy if needed.
+
+  This is future-proof: when PyTorch supports NumPy 2.x, the import
+  will succeed and no downgrade will occur.
+  """
+  try:
+    import torch
+  except ImportError as e:
+    error_msg = str(e)
+    if "_ARRAY_API not found" in error_msg or "numpy.core.multiarray" in error_msg:
+      import numpy as np
+      if np.__version__.startswith("2."):
+        slicer.util.pip_install("numpy<2")
+        slicer.util.infoDisplay(
+          "NumPy has been downgraded for PyTorch compatibility.\n"
+          "Please restart 3D Slicer for the changes to take effect.",
+          windowTitle="UniGradICON"
+        )
+        raise RuntimeError(
+          "NumPy was downgraded for PyTorch compatibility. "
+          "Please restart 3D Slicer."
+        )
+    raise
+
+
 #
 # unigradiconWidget
 #
@@ -47,7 +78,9 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     self._parameterNode = None
     self._updatingGUIFromParameterNode = False
     self.checkpointFolder = self.resourcePath("UI") + "/../../../model_checkpoints/"
-    
+
+    _checkPyTorchNumPyCompatibility()
+
     global sitkUtils
     global sitk
     global np

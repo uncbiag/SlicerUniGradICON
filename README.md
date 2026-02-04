@@ -87,5 +87,7 @@ Here are some common issues that may arise during the installation and use of th
 - The I/O process takes approximately one second per iteration on a GPU. Please be patient during the optimization process, particularly when using a CPU.
 - If an error arises due to incompatibility between `setuptools` and `distutils`, update `setuptools` using the following command in the Slicer Python Console: `slicer.util.pip_install("setuptools -U")`
 
+- **NumPy 2.x compatibility**: On Slicer 5.10+ (which ships with NumPy 2.x), PyTorch may fail to load with errors like `_ARRAY_API not found` or `Numpy is not available`. The extension will attempt to downgrade NumPy automatically when this is detected; if prompted, restart 3D Slicer for the change to take effect. You can also manually run `slicer.util.pip_install("numpy<2")` in the Slicer Python Console and then restart Slicer.
+
 ## Acknowledgements
 This implementation is based on the [SlicerANTs](https://github.com/netstim/SlicerANTs) and [SlicerSegmentWithSAM](https://github.com/mazurowski-lab/SlicerSegmentWithSAM) repositories. We thank the authors for their work.
