@@ -46,6 +46,16 @@ def _checkPyTorchNumPyCompatibility():
     if "_ARRAY_API not found" in error_msg or "numpy.core.multiarray" in error_msg:
       import numpy as np
       if np.__version__.startswith("2."):
+        if not slicer.util.confirmOkCancelDisplay(
+          "NumPy 2.x is incompatible with the installed PyTorch.\n\n"
+          "Do you want to downgrade NumPy to a compatible version?\n"
+          "You will need to restart 3D Slicer after the change.",
+          windowTitle="UniGradICON - NumPy compatibility"
+        ):
+          raise RuntimeError(
+            "UniGradICON requires NumPy < 2 for PyTorch compatibility. "
+            "You can run 'slicer.util.pip_install(\"numpy<2\")' in the Python Console and restart Slicer."
+          )
         slicer.util.pip_install("numpy<2")
         slicer.util.infoDisplay(
           "NumPy has been downgraded for PyTorch compatibility.\n"
