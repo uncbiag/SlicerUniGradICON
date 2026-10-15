@@ -1,27 +1,41 @@
-import os
-import vtk, qt, ctk, slicer
-from slicer.ScriptedLoadableModule import *
+"""Slicer entry point and parameter-node bindings for UniGradICON."""
+import json
+
+import qt
+import slicer
+import vtk
+from slicer.ScriptedLoadableModule import (
+  ScriptedLoadableModule, ScriptedLoadableModuleWidget,
+)
 from slicer.util import VTKObservationMixin
 
-import json
-import glob
-import os
-import numpy as np
-import SimpleITK as sitk
-import logging
+from UniGradICONLib.comparison import ComparisonControls
+from UniGradICONLib.logic import UniGradICONLogic, RemoteRegistration
+from UniGradICONLib.registration import RegistrationControls
+from UniGradICONLib.server import ServerControls, RegistrationServerProcess
+from UniGradICONLib.settings import (
+  PresetManager, REMOTE_PROCESSING_SETTING, SERVER_URL_SETTING,
+  SERVER_TOKENS_SETTING_GROUP, WEIGHTS_DIRECTORY,
+)
+from UniGradICONTests.slicer_tests import UniGradICONTest
 
-input_shape = [1, 1, 175, 175, 175]
-  
+# Keep the entry module's imports stable for Slicer and existing registration scripts.
+__all__ = [
+  "UniGradICON", "UniGradICONWidget", "UniGradICONLogic", "UniGradICONTest",
+  "RegistrationServerProcess", "RemoteRegistration", "PresetManager",
+  "REMOTE_PROCESSING_SETTING", "SERVER_URL_SETTING", "SERVER_TOKENS_SETTING_GROUP",
+]
+
+
 class UniGradICON(ScriptedLoadableModule):
-  """Uses ScriptedLoadableModule base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
+  """Module metadata and Slicer self-test registration."""
 
   def __init__(self, parent):
     ScriptedLoadableModule.__init__(self, parent)
     self.parent.title = "UniGradICON"
     self.parent.categories = ["Registration"]
     self.parent.dependencies = []
+    self.parent.associatedNodeTypes = ["vtkMRMLScriptedModuleNode"]
     self.parent.contributors = ["Basar Demir (University of North Carolina at Chapel Hill), Lin Tian (University of North Carolina at Chapel Hill), Hastings Greer (University of North Carolina at Chapel Hill), Marc Niethammer (University of North Carolina at Chapel Hill)"]
     self.parent.helpText = """
     This module performs medical image registration using the family of foundational GradICON deep registration models. For more information, visit the <a href="https://github.com/uncbiag/uniGradICON">uniGradICON</a> repository.
@@ -29,283 +43,216 @@ class UniGradICON(ScriptedLoadableModule):
     self.parent.acknowledgementText = ""
 
 
-def _checkPyTorchNumPyCompatibility():
-  """Check if PyTorch can be imported with the current NumPy version.
-
-  Some PyTorch versions compiled against NumPy 1.x fail to import when
-  NumPy 2.x is installed due to C API changes. This function detects
-  that specific error and downgrades NumPy if needed.
-
-  This is future-proof: when PyTorch supports NumPy 2.x, the import
-  will succeed and no downgrade will occur.
-  """
-  try:
-    import torch
-  except ImportError as e:
-    error_msg = str(e)
-    if "_ARRAY_API not found" in error_msg or "numpy.core.multiarray" in error_msg:
-      import numpy as np
-      if np.__version__.startswith("2."):
-        if not slicer.util.confirmOkCancelDisplay(
-          "NumPy 2.x is incompatible with the installed PyTorch.\n\n"
-          "Do you want to downgrade NumPy to a compatible version?\n"
-          "You will need to restart 3D Slicer after the change.",
-          windowTitle="UniGradICON - NumPy compatibility"
-        ):
-          raise RuntimeError(
-            "UniGradICON requires NumPy < 2 for PyTorch compatibility. "
-            "You can run 'slicer.util.pip_install(\"numpy<2\")' in the Python Console and restart Slicer."
-          )
-        slicer.util.pip_install("numpy<2")
-        slicer.util.infoDisplay(
-          "NumPy has been downgraded for PyTorch compatibility.\n"
-          "Please restart 3D Slicer for the changes to take effect.",
-          windowTitle="UniGradICON"
-        )
-        raise RuntimeError(
-          "NumPy was downgraded for PyTorch compatibility. "
-          "Please restart 3D Slicer."
-        )
-    raise
-
-
-#
-# unigradiconWidget
-#
-
-class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
-  """Uses ScriptedLoadableModuleWidget base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
+class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls,
+                        ScriptedLoadableModuleWidget, VTKObservationMixin):
+  """Bind the scene's parameter set to the registration, server, and comparison controls."""
 
   def __init__(self, parent=None):
-    """
-    Called when the user opens the module the first time and the widget is initialized.
-    """
     ScriptedLoadableModuleWidget.__init__(self, parent)
-    VTKObservationMixin.__init__(self)  # needed for parameter node observation
+    VTKObservationMixin.__init__(self)
     self.logic = None
     self._parameterNode = None
     self._updatingGUIFromParameterNode = False
-    self.checkpointFolder = self.resourcePath("UI") + "/../../../model_checkpoints/"
+    self.checkpointFolder = WEIGHTS_DIRECTORY
 
-    _checkPyTorchNumPyCompatibility()
+    # Server and connection state.
+    self._localBackendProblem = None
+    self._serverInfo = None
+    self._webServer = None
+    self._lastReconnectAttempt = None
 
-    global sitkUtils
-    global sitk
-    global np
-    global itk
-    global icon
-    global torch
-    global network_wrappers
-    global networks
-    global compute_warped_image_multiNC
-    global itk_wrapper
-    global SampleData
-    global icon_helper
-    
-    import numpy as np
-    import sitkUtils
-    import SampleData
-    import shutil
-    
+    # Registration task state.
+    self._registrationTask = None
+    self._runParameters = None
+    self._completedResult = None
+    self._cancelling = False
+    self._lastPhase = None
+    self._startingRegistration = False
+    self._runSerial = 0
+    self._lastRunWarning = None
+    self._statusIsIdle = True
+    self._registrationStart = None
 
-    if not os.path.exists(self.checkpointFolder):
-      os.makedirs(self.checkpointFolder)
-        
-    if not os.path.exists(self.checkpointFolder + "unigradicon_weights.pth"):
-      slicer.progressWindow = slicer.util.createProgressDialog()
-      self.sampleDataLogic = SampleData.SampleDataLogic()
-      self.sampleDataLogic.logMessage = self.reportProgress
-              
-      weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch", "unigradicon_weights.trch")
-      if self.sampleDataLogic.downloadPercent and self.sampleDataLogic.downloadPercent == 100:
-        shutil.copyfile(weights_location, self.checkpointFolder + "unigradicon_weights.pth")
-        slicer.progressWindow.close()
-    
-    if not os.path.exists(self.checkpointFolder + "multigradicon_weights.pth"):
-      slicer.progressWindow = slicer.util.createProgressDialog()
-      self.sampleDataLogic = SampleData.SampleDataLogic()
-      self.sampleDataLogic.logMessage = self.reportProgress
-      weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/multigradicon_weights/Step_2_final.trch", "Step_2_final.trch")
-      if self.sampleDataLogic.downloadPercent and self.sampleDataLogic.downloadPercent == 100:
-        shutil.copyfile(weights_location, self.checkpointFolder + "multigradicon_weights.pth")
-        slicer.progressWindow.close()
-    
-    # Install PyTorch
-    try:
-      import PyTorchUtils
-    except ModuleNotFoundError as e:
-      raise RuntimeError("This module requires PyTorch extension. Install it from the Extensions Manager.")
+    # Comparison state and temporary preview ownership.
+    self._checkerboardGeneration = 0
+    self._checkerboardJobs = {}
+    self._checkerboardNode = None
+    self._comparisonViewActive = False
+    self._pendingCheckerboard = None
+    self._comparisonSaveRestore = []
 
-    minimumTorchVersion = "1.12"
-    torchLogic = PyTorchUtils.PyTorchUtilsLogic()
-    if not torchLogic.torchInstalled():
-        print('PyTorch Python package is required. Installing... (it may take several minutes)')
-        torch = torchLogic.installTorch(askConfirmation=True, torchVersionRequirement = f">={minimumTorchVersion}")
-        if torch is None:
-            raise RuntimeError("This module requires PyTorch extension. Install it from the Extensions Manager.")
-    else:
-        # torch is installed, check version
-        from packaging import version
-        if version.parse(torchLogic.torch.__version__) < version.parse(minimumTorchVersion):
-            raise RuntimeError(f'PyTorch version {torchLogic.torch.__version__} is not compatible with this module.'
-                              + f' Minimum required version is {minimumTorchVersion}. You can use "PyTorch Util" module to install PyTorch'
-                              + f' with version requirement set to: >={minimumTorchVersion}')
-    import torch
-    import torch.nn.functional as F
-    import copy
-    try:
-      import icon_registration
-    except ModuleNotFoundError:
-      if slicer.util.confirmOkCancelDisplay("'icon_registration' is missing. Click OK to install it."): 
-        slicer.util.pip_install("icon_registration")
-    try:
-      import icon_registration as icon
-      import icon_registration.network_wrappers as network_wrappers
-      import icon_registration.networks as networks
-      from icon_registration.mermaidlite import compute_warped_image_multiNC
-      import icon_registration.itk_wrapper as itk_wrapper
-      import itk
-      import UniGradICONHelpers.icon_helper as icon_helper
-    except ModuleNotFoundError:
-      raise RuntimeError("There is a problem about the installation of 'icon' package. Please try again to install!")
-    
-  def reportProgress(self, msg, level=None):
-    if slicer.progressWindow.wasCanceled:
-        raise Exception("Download aborted")
-    slicer.progressWindow.show()
-    slicer.progressWindow.activateWindow()
-    slicer.progressWindow.setValue(int(self.sampleDataLogic.downloadPercent))
-    slicer.progressWindow.setLabelText("Downloading checkpoints...")
-    slicer.app.processEvents()
-            
+  def ensureLocalBackend(self):
+    """See UniGradICONLogic.ensureLocalBackend."""
+    self.logic.ensureLocalBackend()
+
   def setup(self):
-    """
-    Called when the user opens the module the first time and the widget is initialized.
-    """
     ScriptedLoadableModuleWidget.setup(self)
 
-    # Load widget from .ui file (created by Qt Designer).
-    # Additional widgets can be instantiated manually and added to self.layout.
     uiWidget = slicer.util.loadUI(self.resourcePath('UI/UniGradICON.ui'))
     self.layout.addWidget(uiWidget)
     self.ui = slicer.util.childWidgetVariables(uiWidget)
-    
-    # Set scene in MRML widgets. Make sure that in Qt designer the top-level qMRMLWidget's
-    # "mrmlSceneChanged(vtkMRMLScene*)" signal in is connected to each MRML widget's.
-    # "setMRMLScene(vtkMRMLScene*)" slot.
+    self.ui.parameterNodeSelector.addAttribute("vtkMRMLScriptedModuleNode", "ModuleName", self.moduleName)
+
     uiWidget.setMRMLScene(slicer.mrmlScene)
 
-    # Create logic class. Logic implements all computations that should be possible to run
-    # in batch mode, without a graphical user interface.
     self.logic = UniGradICONLogic(self.checkpointFolder)
 
-    self.ui.stagesPresetsComboBox.addItems(PresetManager().getPresetNames())
-    # Connections
+    self.ui.modelComboBox.addItems(PresetManager().getPresetNames())
+    self.ui.stagesPresetsComboBox = self.ui.modelComboBox  # its name from SlicerANTs, for scripts
 
-    # These connections ensure that we update parameter node when scene is closed
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+    self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartSaveEvent, self.onSceneStartSave)
+    self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndSaveEvent, self.onSceneEndSave)
 
-    # These connections ensure that whenever user changes some settings on the GUI, that is saved in the MRML scene
-    # (in the selected parameter node).
+    self.ui.parameterNodeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onParameterNodeSelected)
+
+    # NB: owned by the GUI, so that it cannot fire once Slicer has destroyed the GUI on exit
+    self._reconnectTimer = qt.QTimer(uiWidget)
+    self._reconnectTimer.setSingleShot(True)
+    self._reconnectTimer.timeout.connect(self.reconnectToServerQuietly)
+    self._taskTimer = qt.QTimer(uiWidget)
+    self._taskTimer.setInterval(100)
+    self._taskTimer.timeout.connect(self._pollRegistration)
+    self._checkerboardTimer = qt.QTimer(uiWidget)
+    self._checkerboardTimer.setInterval(100)
+    self._checkerboardTimer.timeout.connect(self._pollCheckerboards)
+    self._checkerboardRefreshTimer = qt.QTimer(uiWidget)
+    self._checkerboardRefreshTimer.setSingleShot(True)
+    self._checkerboardRefreshTimer.setInterval(200)
+    self._checkerboardRefreshTimer.timeout.connect(self._refreshCheckerboard)
+
+    # Persist edits in the selected scene parameter node.
     self.ui.lossComboBox.connect("currentIndexChanged(int)", self.updateParameterNodeFromGUI)
     self.ui.outputTransformComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
-    self.ui.outputVolumeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
+    self.ui.outputVolumeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.onOutputVolumeChanged)
+    self.ui.createVolumeCheckBox.toggled.connect(self.updateParameterNodeFromGUI)
     self.ui.ioSpinBox.connect("valueChanged(int)", self.updateParameterNodeFromGUI)
     self.ui.deviceComboBox.connect("currentIndexChanged(int)", self.updateParameterNodeFromGUI)
 
-    self.ui.fixedImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateStagesFromFixedMovingNodes)
-    self.ui.movingImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateStagesFromFixedMovingNodes)
+    self.ui.fixedImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateImageSettingsFromGUI)
+    self.ui.movingImageNodeComboBox.connect("currentNodeChanged(vtkMRMLNode*)", self.updateImageSettingsFromGUI)
 
-    self.ui.fixedModalityComboBox.connect("currentIndexChanged(int)", self.updateStagesFromFixedMovingNodes)
-    self.ui.movingModalityComboBox.connect("currentIndexChanged(int)", self.updateStagesFromFixedMovingNodes)
+    self.ui.fixedModalityComboBox.connect("currentIndexChanged(int)", self.updateImageSettingsFromGUI)
+    self.ui.movingModalityComboBox.connect("currentIndexChanged(int)", self.updateImageSettingsFromGUI)
 
-    # Preset Stages
-    self.ui.stagesPresetsComboBox.currentTextChanged.connect(self.onPresetSelected)
+    self.ui.modelComboBox.currentTextChanged.connect(self.onPresetSelected)
 
-    # Buttons
     self.ui.runRegistrationButton.connect('clicked(bool)', self.onRunRegistrationButton)
-    
+    self.ui.newOutputsButton.clicked.connect(self.createNewOutputs)
+    self.ui.compareResultButton.toggled.connect(self.onCompareResult)
+    self.ui.comparisonModeComboBox.currentTextChanged.connect(self.onComparisonModeChanged)
+    self.ui.checkerboardTilesSpinBox.valueChanged.connect(self.onCheckerboardTilesChanged)
+    self.ui.outputTransformComboBox.noneDisplay = "Create automatically"
+    self.ui.outputVolumeComboBox.noneDisplay = "Create automatically"
+
     self.ui.progressBar.hide()
     self.ui.time.hide()
-    
-    # Add GPU option if available
-    if torch.cuda.is_available():
-      self.ui.deviceComboBox.addItem("GPU")
-      
-    # Make sure parameter node is initialized (needed for module reload)
+
+    self.setupServerControls()
+    slicer.app.connect("aboutToQuit()", self.shutdownRegistration)
+    slicer.app.connect("aboutToQuit()", self.cancelCheckerboardOnExit)
+
+    self.addLog(self._localBackendProblem or self.localReadinessMessage())
+    self.updateDeviceChoices()
+    self.updateProcessingGUI()
+
     self.initializeParameterNode()
+
+  def onReload(self):
+    """Reload the adapter packages as well as Slicer's entry script."""
+    import importlib
+    from UniGradICONLib import settings, logic, server, registration, comparison
+    from UniGradICONTests import slicer_tests
+    for module in (settings, logic, server, registration, comparison, slicer_tests):
+      importlib.reload(module)
+    ScriptedLoadableModuleWidget.onReload(self)
+
+  def nodeEditable(self, node):
+    """This module edits its own parameter nodes, also ones created or chosen by other modules."""
+    return 0.7 if node and node.GetAttribute("ModuleName") == self.moduleName else 0.0
+
+  def setEditedNode(self, node, role="", context=""):
+    if not self.nodeEditable(node):
+      return False
+    self.setParameterNode(node)
+    return True
+
   def cleanup(self):
-    """
-    Called when the application closes and the module widget is destroyed.
-    """
+    """Release tasks, temporary previews, the local server, and scene observers."""
+    self.shutdownRegistration()
+    self.clearCheckerboard()
+    self._taskTimer.stop()
+    self.stopServer()
     self.removeObservers()
 
   def enter(self):
-    """
-    Called each time the user opens this module.
-    """
-    # Make sure parameter node exists and observed
     self.initializeParameterNode()
+    self._lastReconnectAttempt = None  # entering the module checks the server again
+    self.scheduleReconnect()
 
   def exit(self):
-    """
-    Called each time the user opens a different module.
-    """
-    # Do not react to parameter node changes (GUI wlil be updated when the user enters into the module)
+    # Do not react to parameter node changes (GUI will be updated when the user enters the module)
     self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
 
   def onSceneStartClose(self, caller, event):
-    """
-    Called just before the scene is closed.
-    """
-    # Parameter node will be reset, do not use it anymore
+    self.cancelRegistration()
+    self.clearCheckerboard()
+    self._completedResult = None
+    self._comparisonSaveRestore = []
+    self.ui.compareResultButton.enabled = False
+    self.ui.progressBar.hide()
+    self.setRegistrationStatus("Select the fixed and moving images to begin.", idle=True)
     self.setParameterNode(None)
 
   def onSceneEndClose(self, caller, event):
-    """
-    Called just after the scene is closed.
-    """
-    # If this module is shown while the scene is closed then recreate a new parameter node immediately
     if self.parent.isEntered:
       self.initializeParameterNode()
 
   def initializeParameterNode(self):
-    """
-    Ensure parameter node exists and observed.
-    """
-    # Parameter node stores all user choices in parameter values, node selections, etc.
-    # so that when the scene is saved and reloaded, these settings are restored.
-    self.setParameterNode(self.logic.getParameterNode() if not self._parameterNode else self._parameterNode)
+    """Restore or create the selected scene parameter node, including after module reload."""
+    if self._parameterNode is None or not slicer.mrmlScene.IsNodePresent(self._parameterNode):
+      self.setParameterNode(self.defaultParameterNode())
+    else:
+      self.setParameterNode(self._parameterNode)
+
+  def defaultParameterNode(self):
+    """The module's own parameter node, else any other in the scene; created only if there is none."""
+    node = slicer.mrmlScene.GetSingletonNode(self.moduleName, "vtkMRMLScriptedModuleNode")
+    if node is None:
+      nodes = [n for n in slicer.util.getNodesByClass("vtkMRMLScriptedModuleNode")
+               if n.GetAttribute("ModuleName") == self.moduleName]
+      node = nodes[0] if nodes else self.logic.getParameterNode()
+    return node
+
+  def onParameterNodeSelected(self, node):
+    if node is None and self.parent.isEntered and not slicer.mrmlScene.IsClosing():
+      node = self.defaultParameterNode()  # the last set was removed
+    if node is not self._parameterNode:
+      self.setParameterNode(node)
 
   def setParameterNode(self, inputParameterNode):
-    """
-    Set and observe parameter node.
-    Observation is needed because when the parameter node is changed then the GUI must be updated immediately.
-    """
+    """Observe the selected parameter set and display its settings."""
 
+    if inputParameterNode is not self._parameterNode and self._completedResult is not None:
+      self.invalidateComparison()
     if inputParameterNode:
       self.logic.setDefaultParameters(inputParameterNode)
 
-    # Unobserve previously selected parameter node and add an observer to the newly selected.
-    # Changes of parameter node are observed so that whenever parameters are changed by a script or any other module
-    # those are reflected immediately in the GUI.
+    # Reflect scene edits from scripts and other modules in the GUI.
     if self._parameterNode is not None:
       self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
     self._parameterNode = inputParameterNode
     if self._parameterNode is not None:
       self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
+    wasBlocked = self.ui.parameterNodeSelector.blockSignals(True)
+    self.ui.parameterNodeSelector.setCurrentNode(self._parameterNode)
+    self.ui.parameterNodeSelector.blockSignals(wasBlocked)
 
-    # Initial GUI update
     self.updateGUIFromParameterNode()
 
   def updateGUIFromParameterNode(self, caller=None, event=None):
-    """
-    This method is called whenever parameter node is changed.
-    The module GUI is updated to show the current state of the parameter node.
-    """
+    """Restore scene settings without writing GUI updates back to the parameter node."""
 
     if self._parameterNode is None or self._updatingGUIFromParameterNode:
       return
@@ -313,467 +260,108 @@ class UniGradICONWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # Make sure GUI changes do not call updateParameterNodeFromGUI (it could cause infinite loop)
     self._updatingGUIFromParameterNode = True
 
-    self.updateStagesGUIFromParameter()
+    self.updateImageSettingsGUIFromParameter()
 
     self.ui.outputTransformComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_TRANSFORM_REF))
     self.ui.outputVolumeComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_VOLUME_REF))
+    self.ui.createVolumeCheckBox.checked = self._parameterNode.GetParameter(self.logic.CREATE_VOLUME_PARAM) == "true"
     self.ui.lossComboBox.currentText = self._parameterNode.GetParameter(self.logic.LOSS_PARAM)
     self.ui.deviceComboBox.currentText = self._parameterNode.GetParameter(self.logic.DEVICE_PARAM)
-    
+
     self.ui.ioSpinBox.value = int(self._parameterNode.GetParameter(self.logic.IO_PARAM))
 
-    self.ui.runRegistrationButton.enabled = self.ui.fixedImageNodeComboBox.currentNodeID and self.ui.movingImageNodeComboBox.currentNodeID and\
-                                            (self.ui.outputTransformComboBox.currentNodeID and self.ui.outputVolumeComboBox.currentNodeID)
+    # where to register; a Slicer that cannot run it locally always uses a server
+    remoteProcessing = self.logic.isRemoteProcessing(self._parameterNode) or self._localBackendProblem is not None
+    processingChanged = remoteProcessing != self.ui.remoteProcessingCheckBox.checked
+    wasBlocked = self.ui.remoteProcessingCheckBox.blockSignals(True)
+    self.ui.remoteProcessingCheckBox.checked = remoteProcessing
+    self.ui.remoteProcessingCheckBox.blockSignals(wasBlocked)
+    serverUrl = self._parameterNode.GetParameter(self.logic.SERVER_URL_PARAM)
+    if serverUrl != self.ui.serverComboBox.currentText:
+      for widget in (self.ui.serverComboBox, self.ui.remoteTokenLineEdit):
+        widget.blockSignals(True)
+      self.ui.serverComboBox.setCurrentText(serverUrl)
+      self.ui.remoteTokenLineEdit.text = self.logic.serverToken(serverUrl)
+      for widget in (self.ui.serverComboBox, self.ui.remoteTokenLineEdit):
+        widget.blockSignals(False)
+      self._serverInfo = None
+      processingChanged = True
 
-    # All the GUI updates are done
+    self.updateRegistrationGUI()
+
     self._updatingGUIFromParameterNode = False
+    if processingChanged:
+      self.updateDeviceChoices()
+      self.updateProcessingGUI()
+      self.scheduleReconnect()
 
-  def updateStagesGUIFromParameter(self):
-    presetParameters = json.loads(self._parameterNode.GetParameter(self.logic.STAGES_JSON_PARAM))
-    self.ui.fixedModalityComboBox.currentText = presetParameters['image']['modality-fixed']
-    self.ui.movingModalityComboBox.currentText = presetParameters['image']['modality-moving']
+  def updateImageSettingsGUIFromParameter(self):
+    """Restore the inputs and modalities of the selected parameter set."""
+    presetParameters = json.loads(self._parameterNode.GetParameter(self.logic.SETTINGS_JSON_PARAM))
+    self.ui.fixedImageNodeComboBox.setCurrentNode(self.logic.inputVolumeNode(self._parameterNode, "fixed"))
+    self.ui.movingImageNodeComboBox.setCurrentNode(self.logic.inputVolumeNode(self._parameterNode, "moving"))
+    # the model of the shown node, without applying its preset again
+    wasBlocked = self.ui.modelComboBox.blockSignals(True)
+    self.ui.modelComboBox.currentText = presetParameters['modelSettings']['model']
+    self.ui.modelComboBox.blockSignals(wasBlocked)
+    fixedModality, movingModality = self.logic.modalityNames(
+      presetParameters['image']['modality-fixed'], presetParameters['image']['modality-moving'])
+    self.ui.fixedModalityComboBox.currentText = fixedModality
+    self.ui.movingModalityComboBox.currentText = movingModality
     self.logic.changeModelSettings(presetParameters)
 
   def updateParameterNodeFromGUI(self, caller=None, event=None):
-    """
-    This method is called when the user makes any change in the GUI.
-    The changes are saved into the parameter node (so that they are restored when the scene is saved and loaded).
-    """
+    """Save control values and output references in the selected parameter set."""
 
     if self._parameterNode is None or self._updatingGUIFromParameterNode:
       return
 
-    wasModified = self._parameterNode.StartModify()  # Modify all properties in a single batch
-    
+    wasModified = self._parameterNode.StartModify()
+
     self._parameterNode.SetNodeReferenceID(self.logic.OUTPUT_TRANSFORM_REF, self.ui.outputTransformComboBox.currentNodeID)
     self._parameterNode.SetNodeReferenceID(self.logic.OUTPUT_VOLUME_REF, self.ui.outputVolumeComboBox.currentNodeID)
     self._parameterNode.SetParameter(self.logic.LOSS_PARAM, self.ui.lossComboBox.currentText)
     self._parameterNode.SetParameter(self.logic.IO_PARAM, str(self.ui.ioSpinBox.value))
     self._parameterNode.SetParameter(self.logic.DEVICE_PARAM, self.ui.deviceComboBox.currentText)
+    self._parameterNode.SetParameter(self.logic.CREATE_VOLUME_PARAM,
+                                     "true" if self.ui.createVolumeCheckBox.checked else "false")
+    self._parameterNode.SetParameter(self.logic.REMOTE_PROCESSING_PARAM,
+                                     "true" if self.ui.remoteProcessingCheckBox.checked else "false")
+    self._parameterNode.SetParameter(self.logic.SERVER_URL_PARAM, self.ui.serverComboBox.currentText.strip())
 
     self._parameterNode.EndModify(wasModified)
 
+  def imageSettingsFromGUI(self):
+    return {
+      "fixed": self.ui.fixedImageNodeComboBox.currentNodeID,
+      "moving": self.ui.movingImageNodeComboBox.currentNodeID,
+      "modality-fixed": self.ui.fixedModalityComboBox.currentText,
+      "modality-moving": self.ui.movingModalityComboBox.currentText,
+    }
 
-  def updateStagesFromFixedMovingNodes(self):
+  def updateImageSettingsFromGUI(self):
+    """Store the selected images and their modalities in the settings (StagesJson)."""
     if self._parameterNode is None or self._updatingGUIFromParameterNode:
       return
-    presetParameters = json.loads(self._parameterNode.GetParameter(self.logic.STAGES_JSON_PARAM))
-    presetParameters['image']['fixed'] = self.ui.fixedImageNodeComboBox.currentNodeID
-    presetParameters['image']['moving'] = self.ui.movingImageNodeComboBox.currentNodeID
-    
-    presetParameters['image']['modality-fixed'] = self.ui.fixedModalityComboBox.currentText
-    presetParameters['image']['modality-moving'] = self.ui.movingModalityComboBox.currentText
-  
-    self._parameterNode.SetParameter(self.logic.STAGES_JSON_PARAM, json.dumps(presetParameters))
+    presetParameters = json.loads(self._parameterNode.GetParameter(self.logic.SETTINGS_JSON_PARAM))
+    presetParameters['image'].update(self.imageSettingsFromGUI())
 
-  def updateProgress(self, allProgress, currentProgress, elapsedTime=None, remainingTime=None):
-    self.ui.progressBar.maximum = allProgress
-    self.ui.progressBar.value = currentProgress-1
-    self.ui.progressBar.show()
-    
-    if elapsedTime is not None and remainingTime is not None:
-      self.ui.time.text = f"Elapsed Time: {elapsedTime:.2f}s Remaining Time: {remainingTime:.2f}s"
-      self.ui.time.show()
-    else:
-      self.ui.time.hide()
-    if allProgress == currentProgress:
-      self.ui.progressBar.hide()
-      
+    wasModified = self._parameterNode.StartModify()
+    try:
+      for role, referenceRole in self.logic.INPUT_VOLUME_REFS.items():
+        self._parameterNode.SetNodeReferenceID(referenceRole, presetParameters['image'][role] or "")
+      self._parameterNode.SetParameter(self.logic.SETTINGS_JSON_PARAM, json.dumps(presetParameters))
+    finally:
+      self._parameterNode.EndModify(wasModified)
+
   def onPresetSelected(self, presetName):
     if presetName == 'Select...' or self._parameterNode is None or self._updatingGUIFromParameterNode:
       return
-    wasModified = self._parameterNode.StartModify()  # Modify in a single batch
+    wasModified = self._parameterNode.StartModify()
     presetParameters = PresetManager().getPresetParametersByName(presetName)
-    presetParameters['image']['fixed'] = self.ui.fixedImageNodeComboBox.currentNodeID
-    presetParameters['image']['moving'] = self.ui.movingImageNodeComboBox.currentNodeID
-    presetParameters['image']['modality-fixed'] = self.ui.fixedModalityComboBox.currentText
-    presetParameters['image']['modality-moving'] = self.ui.movingModalityComboBox.currentText
-      
-    self._parameterNode.SetParameter(self.logic.STAGES_JSON_PARAM, json.dumps(presetParameters))
+    presetParameters['image'].update(self.imageSettingsFromGUI())
+
+    self._parameterNode.SetParameter(self.logic.SETTINGS_JSON_PARAM, json.dumps(presetParameters))
     self._parameterNode.EndModify(wasModified)
-    
+
     self.logic.changeModelSettings(presetParameters)
-
-  def onRunRegistrationButton(self):
-    if self.ui.runRegistrationButton.text == 'Cancel':
-      return
-
-    parameters = self.logic.createProcessParameters(self._parameterNode)
-    self.logic.process(**parameters, call_back=self.updateProgress)
-
-    #show message box
-    slicer.util.infoDisplay("Registration is completed!")
-    
-#
-# unigradiconLogic
-#
-class UniGradICONLogic(ScriptedLoadableModuleLogic):
-  """This class should implement all the actual
-  computation done by your module.  The interface
-  should be such that other python code can import
-  this class and make use of the functionality without
-  requiring an instance of the Widget.
-  Uses ScriptedLoadableModuleLogic base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
-
-  OUTPUT_TRANSFORM_REF = "OutputTransform"
-  OUTPUT_VOLUME_REF = "OutputVolume"
-  LOSS_PARAM = "LNCC"
-  STAGES_JSON_PARAM = "StagesJson"
-  IO_PARAM = "0"
-  DEVICE_PARAM = "CPU"
-
-  def __init__(self, weights_location):
-    """
-    Called when the logic class is instantiated. Can be used for initializing member variables.
-    """
-    ScriptedLoadableModuleLogic.__init__(self)
-    self.weights_location = weights_location
-    self.device = torch.device("cpu")
-    print(self.device)
-    self.model = icon_helper.make_network(input_shape, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=self.device)
-    self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device, weights_only=True))
-    self.model.to(self.device)
-    
-
-  def setDefaultParameters(self, parameterNode):
-    """
-    Initialize parameter node with default settings.
-    """
-    presetParameters = PresetManager().getPresetParametersByName()
-    if not parameterNode.GetParameter(self.STAGES_JSON_PARAM):
-      parameterNode.SetParameter(self.STAGES_JSON_PARAM, json.dumps(presetParameters))
-    if not parameterNode.GetNodeReference(self.OUTPUT_TRANSFORM_REF):
-      parameterNode.SetNodeReferenceID(self.OUTPUT_TRANSFORM_REF, "")
-    if not parameterNode.GetNodeReference(self.OUTPUT_VOLUME_REF):
-      parameterNode.SetNodeReferenceID(self.OUTPUT_VOLUME_REF, "")
-    if not parameterNode.GetParameter(self.LOSS_PARAM):
-      parameterNode.SetParameter(self.LOSS_PARAM, str(presetParameters["modelSettings"]["loss"]))
-    if not parameterNode.GetParameter(self.IO_PARAM):
-      parameterNode.SetParameter(self.IO_PARAM, str(presetParameters["modelSettings"]["io_steps"]))
-    if not parameterNode.GetParameter(self.DEVICE_PARAM):
-      parameterNode.SetParameter(self.DEVICE_PARAM, str(presetParameters["modelSettings"]["device"]))
-      
-  def createProcessParameters(self, paramNode):
-    parameters = json.loads(paramNode.GetParameter(self.STAGES_JSON_PARAM))
-
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = paramNode.GetNodeReference(self.OUTPUT_TRANSFORM_REF)
-    parameters['outputSettings']['volume'] = paramNode.GetNodeReference(self.OUTPUT_VOLUME_REF)
-    parameters['outputSettings']['loss'] = paramNode.GetParameter(self.LOSS_PARAM)
-
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = int(paramNode.GetParameter(self.IO_PARAM))
-    parameters['generalSettings']['device'] = str(paramNode.GetParameter(self.DEVICE_PARAM))
-    
-    return parameters
-
-  def itk2sitk(self, itk_image):
-    sitkImage = sitk.GetImageFromArray(itk.GetArrayFromImage(itk_image))
-
-    sitkImage.SetOrigin(tuple(itk_image.GetOrigin()))
-    sitkImage.SetSpacing(tuple(itk_image.GetSpacing()))
-    sitkImage.SetDirection(itk.GetArrayFromMatrix(itk_image.GetDirection()).flatten()) 
-    
-    return sitkImage
-  
-  def sitk2itk(self, sitk_image):
-    itk_image = itk.GetImageFromArray(sitk.GetArrayFromImage(sitk_image))
-    image_dimension = 3
-    
-    itk_image.SetOrigin(sitk_image.GetOrigin())
-    itk_image.SetSpacing(sitk_image.GetSpacing())
-    itk_image.SetDirection(itk.GetMatrixFromArray(np.reshape(np.array(sitk_image.GetDirection()), [image_dimension]*2)))
-    
-    return itk_image
-  
-  def changeModelSettings(self, presetParameters):
-    if presetParameters['modelSettings']['model'] == 'unigradicon':
-      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "unigradicon_weights.pth", map_location=self.device, weights_only=True))
-    if presetParameters['modelSettings']['model'] == 'multigradicon':
-      self.model.regis_net.load_state_dict(torch.load(self.weights_location + "multigradicon_weights.pth", map_location=self.device, weights_only=True))
-    
-    self.model.similarity = icon_helper.make_sim(presetParameters['modelSettings']['loss'])
-    self.model.eval()
-
-
-  def process(self, image, outputSettings, modelSettings=None, generalSettings=None, wait_for_completion=False, call_back=None):
-    """
-    :param stages: list defining registration stages
-    :param outputSettings: dictionary defining output settings
-    :param initialTransformSettings: dictionary defining initial moving transform
-    :param generalSettings: dictionary defining general registration settings
-    :param wait_for_completion: flag to enable waiting for completion
-    See presets examples to see how these are specified
-    """
-    
-    fixed_image = sitkUtils.PullVolumeFromSlicer(image['fixed'])
-    moving_image = sitkUtils.PullVolumeFromSlicer(image['moving'])
-    
-    fixed_image_modality = image['modality-fixed']
-    moving_image_modality = image['modality-moving']
-    
-    #convert to itk
-    fixed = self.sitk2itk(fixed_image)
-    moving = self.sitk2itk(moving_image)
-    
-    if generalSettings['device'] == 'GPU':
-      self.model.cuda()
-      self.model.device = 'cuda'
-    else:
-      self.model.cpu()
-      self.model.device = 'cpu'
-    
-    if generalSettings["io_steps"] != 0 and call_back is not None:
-      call_back(generalSettings["io_steps"], 0)
-    #convert to itk by preserving metadata
-    phi_AB, _ = icon_helper.register_pair(
-        self.model,
-        icon_helper.preprocess(moving, moving_image_modality), 
-        icon_helper.preprocess(fixed, fixed_image_modality), 
-        finetune_steps= None if generalSettings["io_steps"] == 0 else generalSettings["io_steps"],
-        call_back = call_back
-    )
-    if generalSettings["io_steps"] != 0 and call_back is not None:
-      call_back(generalSettings["io_steps"], generalSettings["io_steps"])
-    
-    itk.transformwrite([phi_AB], f'{slicer.app.temporaryPath}/transform.tfm')
-    
-    transformNode = outputSettings['transform']
-    storageNode = transformNode.CreateDefaultStorageNode()
-    storageNode.SetFileName(f'{slicer.app.temporaryPath}/transform.tfm')
-    storageNode.ReadData(transformNode)
-
-    moving = itk.CastImageFilter[type(moving), itk.Image[itk.F, 3]].New()(moving)
-    interpolator = itk.LinearInterpolateImageFunction.New(moving)
-    warped_moving_image = itk.resample_image_filter(
-            moving,
-            transform=phi_AB,
-            interpolator=interpolator,
-            use_reference_image=True,
-            reference_image=fixed
-            )
-
-    outputVolumeNode = outputSettings['volume']
-    outputVolumeNode.CreateDefaultDisplayNodes()
-    sitkUtils.PushVolumeToSlicer(self.itk2sitk(warped_moving_image), outputVolumeNode)
-  
-  
-class PresetManager:
-  def __init__(self):
-      self.presetPath = os.path.join(os.path.dirname(__file__), 'Resources', 'Presets')
-
-  def saveStagesAsPreset(self, stages):
-    from PythonQt import BoolResult
-    ok = BoolResult()
-    presetName = \
-      qt.QInputDialog().getText(qt.QWidget(), 'Save Preset', 'Preset name: ', qt.QLineEdit.Normal, 'my_preset', ok)
-    if not ok:
-      return
-    if presetName in self.getPresetNames():
-      slicer.util.warningDisplay(f'{presetName} already exists. Set another name.')
-      return self.saveStagesAsPreset(stages)
-    outFilePath = os.path.join(self.presetPath, f'{presetName}.json')
-    saveSettings = self.getPresetParametersByName()
-    saveSettings['stages'] = stages
-    try:
-      with open(outFilePath, 'w') as outfile:
-        json.dump(saveSettings, outfile)
-    except:
-      slicer.util.warningDisplay(f'Unable to write into {outFilePath}')
-      return
-    slicer.util.infoDisplay(f'Saved preset to {outFilePath}.')
-    return presetName
-
-  def getPresetParametersByName(self, name='unigradicon'):
-    presetFilePath = os.path.join(self.presetPath, name + '.json')
-    with open(presetFilePath) as presetFile:
-      return json.load(presetFile)
-
-  def getPresetNames(self):
-    G = glob.glob(os.path.join(self.presetPath, '*.json'))
-    return [os.path.splitext(os.path.basename(g))[0] for g in G]
-
-#
-# unigradiconTest
-#
-class UniGradICONTest(ScriptedLoadableModuleTest):
-  """
-  This is the test case for your scripted module.
-  Uses ScriptedLoadableModuleTest base class, available at:
-  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
-  """
-
-  def setUp(self):
-    """ Do whatever is needed to reset the state - typically a scene clear will be enough.
-    """
-    slicer.mrmlScene.Clear()
-
-  def runTest(self):
-    """Run as few or as many tests as needed here.
-    """
-    self.setUp()
-    self.test_UniGradICON()
-    
-    
-  def test_wo_IO(self):
-    parameters = {}
-
-    parameters['image'] = {}
-    parameters['image']['fixed'] = self.fixed
-    parameters['image']['moving'] = self.moving
-    
-    parameters['image']['modality-fixed'] = 'MRI'
-    parameters['image']['modality-moving'] = 'MRI'
-    
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = self.outputTransform
-    parameters['outputSettings']['volume'] = self.outputVolume
-    parameters['outputSettings']['loss'] = 'LNCC'
-    
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = int(0)
-    parameters['generalSettings']['device'] = str('CPU')
-    
-    return parameters
-  
-  def test_w_LNCC(self):
-    parameters = {}
-
-    parameters['image'] = {}
-    parameters['image']['fixed'] = self.fixed
-    parameters['image']['moving'] = self.moving
-    
-    parameters['image']['modality-fixed'] = 'MRI'
-    parameters['image']['modality-moving'] = 'MRI'
-    
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = self.outputTransform
-    parameters['outputSettings']['volume'] = self.outputVolume
-    parameters['outputSettings']['loss'] = 'LNCC'
-    
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = int(1)
-    parameters['generalSettings']['device'] = str('CPU')
-    
-    return parameters
-  
-  def test_w_SquaredLNCC(self):
-    parameters = {}
-
-    parameters['image'] = {}
-    parameters['image']['fixed'] = self.fixed
-    parameters['image']['moving'] = self.moving
-    
-    parameters['image']['modality-fixed'] = 'MRI'
-    parameters['image']['modality-moving'] = 'MRI'
-    
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = self.outputTransform
-    parameters['outputSettings']['volume'] = self.outputVolume
-    parameters['outputSettings']['loss'] = 'SquaredLNCC'
-    
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = int(1)
-    parameters['generalSettings']['device'] = str('CPU')
-    
-    return parameters
-  
-  def test_w_MINDSSC(self):
-    parameters = {}
-
-    parameters['image'] = {}
-    parameters['image']['fixed'] = self.fixed
-    parameters['image']['moving'] = self.moving
-    
-    parameters['image']['modality-fixed'] = 'MRI'
-    parameters['image']['modality-moving'] = 'MRI'
-    
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = self.outputTransform
-    parameters['outputSettings']['volume'] = self.outputVolume
-    parameters['outputSettings']['loss'] = 'MINDSSC'
-    
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = int(1)
-    parameters['generalSettings']['device'] = str('CPU')
-    
-    return parameters
-  
-  def test_GPU(self):
-    parameters = {}
-
-    parameters['image'] = {}
-    parameters['image']['fixed'] = self.fixed
-    parameters['image']['moving'] = self.moving
-    
-    parameters['image']['modality-fixed'] = 'MRI'
-    parameters['image']['modality-moving'] = 'MRI'
-    
-    parameters['outputSettings'] = {}
-    parameters['outputSettings']['transform'] = self.outputTransform
-    parameters['outputSettings']['volume'] = self.outputVolume
-    parameters['outputSettings']['loss'] = 'LNCC'
-    
-    parameters['generalSettings'] = {}
-    parameters['generalSettings']['io_steps'] = 0
-    parameters['generalSettings']['device'] = str('GPU')
-    
-    return parameters
-  
-  def test_UniGradICON(self):
-    """ Ideally you should have several levels of tests.  At the lowest level
-    tests should exercise the functionality of the logic with different inputs
-    (both valid and invalid).  At higher levels your tests should emulate the
-    way the user would interact with your code and confirm that it still works
-    the way you intended.
-    One of the most important features of the tests is that it should alert other
-    developers when their changes will have an impact on the behavior of your
-    module.  For example, if a developer removes a feature that you depend on,
-    your test should break so they know that the feature is needed.
-    """
-
-    self.delayDisplay("Starting the test")
-
-    import SampleData
-    sampleDataLogic = SampleData.SampleDataLogic()
-    self.fixed = sampleDataLogic.downloadMRBrainTumor1()
-    self.moving = sampleDataLogic.downloadMRBrainTumor2()
-
-    self.outputVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
-    self.outputTransform = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLTransformNode')
-    
-    self.sampleDataLogic = SampleData.SampleDataLogic()
-    weights_location = self.sampleDataLogic.downloadFileIntoCache("https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch", "unigradicon_weights.pth")
-    
-    logic = UniGradICONLogic(weights_location.split("unigradicon_weights.pth")[0])
-    
-    # Logic testing is disabled by default to not overload automatic build machines.
-    testLogic = False
-    
-    if testLogic:
-      parameters = self.test_wo_IO()
-      logic.process(**parameters)
-      print("w/o IO test passed!")
-      
-      parameters = self.test_w_LNCC()
-      logic.process(**parameters)
-      print("w/ LNCC test passed!")
-      
-      parameters = self.test_w_SquaredLNCC()
-      logic.process(**parameters)
-      print("w/ SquaredLNCC test passed!")
-      
-      parameters = self.test_w_MINDSSC()
-      logic.process(**parameters)
-      print("w/ MINDSSC test passed!")
-      
-      if torch.cuda.is_available():
-        parameters = self.test_GPU()
-        logic.process(**parameters)
-        print("w/ GPU test passed!")
-      
-      self.delayDisplay('Test passed!')
-    else:
-      logging.log(logging.warning, 'Tests was skipped. Enable it by setting testLogic variable to True.') 

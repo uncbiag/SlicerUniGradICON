@@ -1,0 +1,6 @@
+# Registration server without Slicer; install PyTorch for your GPU first (https://pytorch.org)
+icon_registration
+itk
+fastapi
+uvicorn
+python-multipart

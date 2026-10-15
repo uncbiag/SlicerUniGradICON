@@ -42,9 +42,6 @@ class GradientICONSparse(network_wrappers.RegistrationModule):
         # or extrapolated
 
         if getattr(self.similarity, "isInterpolated", False):
-            # tag images during warping so that the similarity measure
-            # can use information about whether a sample is interpolated
-            # or extrapolated
             inbounds_tag = torch.zeros([image_A.shape[0]] + [1] + list(image_A.shape[2:]), device=image_A.device)
             if len(self.input_shape) - 2 == 3:
                 inbounds_tag[:, :, 1:-1, 1:-1, 1:-1] = 1.0
@@ -157,16 +154,18 @@ def make_sim(similarity):
     if similarity == "LNCC":
         return icon.LNCC(sigma=5)
     elif similarity == "Squared LNCC":
-        return icon. SquaredLNCC(sigma=5)
+        return icon.SquaredLNCC(sigma=5)
     elif similarity == "MIND-SSC":
         return icon.MINDSSC(radius=2, dilation=2)
     else:
-        raise ValueError(f"Similarity measure {similarity} not recognized. Choose from [lncc, lncc2, mind].")
+        raise ValueError(f"Similarity measure {similarity} not recognized. Choose LNCC, Squared LNCC or MIND-SSC.")
 
 def quantile(arr: torch.Tensor, q):
     arr = arr.flatten()
     l = len(arr)
-    return torch.kthvalue(arr, int(q * l)).values
+    if not l:
+        raise ValueError("The image is empty")
+    return torch.kthvalue(arr, max(1, min(l, int(q * l)))).values
 
 def apply_mask(image, segmentation):
     segmentation_cast_filter = itk.CastImageFilter[type(segmentation),
@@ -183,16 +182,21 @@ def apply_mask(image, segmentation):
 
     return mask_filter.GetOutput()
 
-def preprocess(image, modality="ct", segmentation=None):
+def preprocess(image, modality="CT/CBCT", segmentation=None):
+    image = itk.CastImageFilter[type(image), itk.Image[itk.F, 3]].New()(image)
+    values = np.array(image)
+    if not np.isfinite(values).all():
+        raise ValueError(f"{modality} image contains non-finite intensities. Remove NaN and infinite values before registration.")
     if modality == "CT/CBCT":
         min_ = -1000
         max_ = 1000
-        image = itk.CastImageFilter[type(image), itk.Image[itk.F, 3]].New()(image)
         image = itk.clamp_image_filter(image, Bounds=(-1000, 1000))
     elif modality == "MRI":
-        image = itk.CastImageFilter[type(image), itk.Image[itk.F, 3]].New()(image)
         min_, _ = itk.image_intensity_min_max(image)
-        max_ = quantile(torch.tensor(np.array(image)), .99).item()
+        max_ = quantile(torch.from_numpy(values), .99).item()
+        if not np.isfinite(min_) or not np.isfinite(max_) or max_ <= min_:
+            raise ValueError("MRI image has no usable intensity range after 99th-percentile clipping. "
+                             "Check for constant intensities, non-finite values or an almost empty image.")
         image = itk.clamp_image_filter(image, Bounds=(min_, max_))
     else:
         raise ValueError(f"{modality} not recognized. Use 'ct' or 'mri'.")
@@ -201,31 +205,51 @@ def preprocess(image, modality="ct", segmentation=None):
 
     if segmentation is not None:
         image = apply_mask(image, segmentation)
+    minimum, maximum = itk.image_intensity_min_max(image)
+    if minimum == maximum:
+        raise ValueError(f"{modality} image has no intensity variation after preprocessing or masking. Check the image and mask.")
     return image
 
 def finetune_execute(model, image_A, image_B, steps, call_back=None):
+    """Optimize this pair, restoring cached weights after success, cancellation, or failure."""
     state_dict = copy.deepcopy(model.state_dict())
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.00002)
-    
-    with tqdm(range(steps)) as t:
-        for step in t:
-            if call_back:
-                elapsed = t.format_dict['elapsed']
-                rate = t.format_dict["rate"]
-                remaining = (t.total - t.n) / rate if rate and t.total else 0  # Seconds*
-                call_back(steps, step, elapsed, remaining)
-            optimizer.zero_grad()
-            loss_tuple = model(image_A, image_B)
-            loss_tuple[0].backward()
-            optimizer.step()
+    try:
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.00002)
 
-
-    with torch.no_grad():
-        loss = model(image_A, image_B)
-    model.load_state_dict(state_dict)
+        with tqdm(range(steps)) as t:
+            for step in t:
+                if call_back:
+                    elapsed = t.format_dict['elapsed']
+                    rate = t.format_dict["rate"]
+                    remaining = (t.total - t.n) / rate if rate and t.total else 0  # Seconds*
+                    call_back(steps, step, elapsed, remaining)
+                optimizer.zero_grad()
+                loss_tuple = model(image_A, image_B)
+                loss_tuple[0].backward()
+                optimizer.step()
+        with torch.no_grad():
+            loss = model(image_A, image_B)
+    finally:
+        model.load_state_dict(state_dict)
     return loss
     
 def register_pair(
+    model, image_A, image_B, finetune_steps=None, call_back=None
+) -> "(itk.CompositeTransform, itk.CompositeTransform)":
+    # Benchmarking may select a nondeterministic convolution algorithm. Even
+    # submicron transform changes can flip samples across the image boundary
+    # and produce large voxel differences. Scope these flags to registration
+    # and leave TF32 and other modules' backend settings unchanged afterward.
+    with torch.backends.cudnn.flags(
+        enabled=torch.backends.cudnn.enabled,
+        benchmark=False,
+        deterministic=True,
+        allow_tf32=torch.backends.cudnn.allow_tf32,
+    ):
+        return _register_pair(model, image_A, image_B, finetune_steps, call_back)
+
+
+def _register_pair(
     model, image_A, image_B, finetune_steps=None, call_back=None
 ) -> "(itk.CompositeTransform, itk.CompositeTransform)":
 

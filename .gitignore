@@ -1,6 +1,7 @@
-UniGradICON/__pycache__/
+__pycache__/
 model_checkpoints/
 build/
 .DS_Store
 ._*
-*.cpython*
+*.py[cod]
+.pytest_cache/

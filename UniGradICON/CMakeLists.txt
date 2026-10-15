@@ -4,8 +4,21 @@ set(MODULE_NAME UniGradICON)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
+  UniGradICONLib/__init__.py
+  UniGradICONLib/settings.py
+  UniGradICONLib/logic.py
+  UniGradICONLib/server.py
+  UniGradICONLib/registration.py
+  UniGradICONLib/comparison.py
+  UniGradICONTests/__init__.py
+  UniGradICONTests/slicer_tests.py
   UniGradICONHelpers/__init__.py
   UniGradICONHelpers/icon_helper.py
+  UniGradICONHelpers/registration.py
+  UniGradICONHelpers/remote.py
+  UniGradICONHelpers/task.py
+  UniGradICONHelpers/local_worker.py
+  UniGradICONServer/server.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -13,6 +26,8 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Presets/multigradicon.json
   Resources/Presets/unigradicon.json
   Resources/UI/${MODULE_NAME}.ui
+  UniGradICONServer/README.md
+  UniGradICONServer/requirements.txt
   )
 
 set(EXTENSION_HOMEPAGE "https://github.com/uncbiag/SlicerUniGradICON")
