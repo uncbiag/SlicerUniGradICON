@@ -9,9 +9,12 @@ from slicer.ScriptedLoadableModule import (
 )
 from slicer.util import VTKObservationMixin
 
+from UniGradICONLib.preview import InputPreviewControls
+from UniGradICONLib.readiness import BackendReadinessControls
 from UniGradICONLib.comparison import ComparisonControls
 from UniGradICONLib.logic import UniGradICONLogic, RemoteRegistration
 from UniGradICONLib.registration import RegistrationControls
+from UniGradICONLib.segmentation import SegmentationControls
 from UniGradICONLib.server import ServerControls, RegistrationServerProcess
 from UniGradICONLib.settings import (
   PresetManager, REMOTE_PROCESSING_SETTING, SERVER_URL_SETTING,
@@ -43,7 +46,8 @@ class UniGradICON(ScriptedLoadableModule):
     self.parent.acknowledgementText = ""
 
 
-class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls,
+class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls, SegmentationControls,
+                        InputPreviewControls, BackendReadinessControls,
                         ScriptedLoadableModuleWidget, VTKObservationMixin):
   """Bind the scene's parameter set to the registration, server, and comparison controls."""
 
@@ -53,6 +57,8 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
     self.logic = None
     self._parameterNode = None
     self._updatingGUIFromParameterNode = False
+    self._sceneImportPending = False
+    self._sceneImportSerial = 0
     self.checkpointFolder = WEIGHTS_DIRECTORY
 
     # Server and connection state.
@@ -80,6 +86,7 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
     self._comparisonViewActive = False
     self._pendingCheckerboard = None
     self._comparisonSaveRestore = []
+    self._comparisonSegmentationVisibility = []
 
   def ensureLocalBackend(self):
     """See UniGradICONLogic.ensureLocalBackend."""
@@ -104,6 +111,9 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartSaveEvent, self.onSceneStartSave)
     self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndSaveEvent, self.onSceneEndSave)
+    self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndImportEvent, self.onSceneEndImport)
+    self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartImportEvent, self.onSceneStartImport)
+    self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAddedEvent, self.onComparisonNodeAdded)
 
     self.ui.parameterNodeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onParameterNodeSelected)
 
@@ -143,13 +153,17 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
     self.ui.compareResultButton.toggled.connect(self.onCompareResult)
     self.ui.comparisonModeComboBox.currentTextChanged.connect(self.onComparisonModeChanged)
     self.ui.checkerboardTilesSpinBox.valueChanged.connect(self.onCheckerboardTilesChanged)
+    self.ui.comparisonSegmentationsCheckBox.toggled.connect(self.updateComparisonSegmentations)
     self.ui.outputTransformComboBox.noneDisplay = "Create automatically"
     self.ui.outputVolumeComboBox.noneDisplay = "Create automatically"
 
     self.ui.progressBar.hide()
     self.ui.time.hide()
 
+    self.setupSegmentationControls()
     self.setupServerControls()
+    self.setupInputPreviews()
+    self.setupBackendReadiness()
     slicer.app.connect("aboutToQuit()", self.shutdownRegistration)
     slicer.app.connect("aboutToQuit()", self.cancelCheckerboardOnExit)
 
@@ -162,9 +176,10 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
   def onReload(self):
     """Reload the adapter packages as well as Slicer's entry script."""
     import importlib
-    from UniGradICONLib import settings, logic, server, registration, comparison
-    from UniGradICONTests import slicer_tests
-    for module in (settings, logic, server, registration, comparison, slicer_tests):
+    from UniGradICONHelpers import segmentation as segmentation_options
+    from UniGradICONLib import settings, logic, server, registration, comparison, segmentation, preview, readiness
+    from UniGradICONTests import slicer_tests, segmentation_tests, workflow_tests
+    for module in (segmentation_options, settings, logic, server, registration, comparison, segmentation, preview, readiness, segmentation_tests, workflow_tests, slicer_tests):
       importlib.reload(module)
     ScriptedLoadableModuleWidget.onReload(self)
 
@@ -180,7 +195,11 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
 
   def cleanup(self):
     """Release tasks, temporary previews, the local server, and scene observers."""
+    self._sceneImportSerial += 1
+    self._sceneImportPending = False
     self.shutdownRegistration()
+    self.stopBackendChecks()
+    self.clearInputPreview()
     self.clearCheckerboard()
     self._taskTimer.stop()
     self.stopServer()
@@ -188,15 +207,20 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
 
   def enter(self):
     self.initializeParameterNode()
+    self.updateComparisonSegmentations()
     self._lastReconnectAttempt = None  # entering the module checks the server again
     self.scheduleReconnect()
 
   def exit(self):
+    self.restoreComparisonSegmentations()
     # Do not react to parameter node changes (GUI will be updated when the user enters the module)
     self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
 
   def onSceneStartClose(self, caller, event):
+    self._sceneImportSerial += 1
+    self._sceneImportPending = False
     self.cancelRegistration()
+    self.clearInputPreview()
     self.clearCheckerboard()
     self._completedResult = None
     self._comparisonSaveRestore = []
@@ -208,6 +232,21 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
   def onSceneEndClose(self, caller, event):
     if self.parent.isEntered:
       self.initializeParameterNode()
+
+  def onSceneStartImport(self, caller, event):
+    self._sceneImportSerial += 1
+    self._sceneImportPending = True
+
+  def onSceneEndImport(self, caller, event):
+    # Node selectors finish rebuilding after the scene's EndImport observers run.
+    serial = self._sceneImportSerial
+    qt.QTimer.singleShot(0, lambda: self._finishSceneImport(serial))
+
+  def _finishSceneImport(self, serial):
+    if serial != self._sceneImportSerial:
+      return
+    self._sceneImportPending = False
+    self.initializeParameterNode()
 
   def initializeParameterNode(self):
     """Restore or create the selected scene parameter node, including after module reload."""
@@ -226,6 +265,8 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
     return node
 
   def onParameterNodeSelected(self, node):
+    if slicer.mrmlScene.IsImporting() or self._sceneImportPending:
+      return
     if node is None and self.parent.isEntered and not slicer.mrmlScene.IsClosing():
       node = self.defaultParameterNode()  # the last set was removed
     if node is not self._parameterNode:
@@ -254,13 +295,14 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
   def updateGUIFromParameterNode(self, caller=None, event=None):
     """Restore scene settings without writing GUI updates back to the parameter node."""
 
-    if self._parameterNode is None or self._updatingGUIFromParameterNode:
+    if self._parameterNode is None or self._updatingGUIFromParameterNode or slicer.mrmlScene.IsImporting():
       return
 
     # Make sure GUI changes do not call updateParameterNodeFromGUI (it could cause infinite loop)
     self._updatingGUIFromParameterNode = True
 
     self.updateImageSettingsGUIFromParameter()
+    self.restoreSegmentationSettings()
 
     self.ui.outputTransformComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_TRANSFORM_REF))
     self.ui.outputVolumeComboBox.setCurrentNode(self._parameterNode.GetNodeReference(self.logic.OUTPUT_VOLUME_REF))
@@ -313,11 +355,12 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
   def updateParameterNodeFromGUI(self, caller=None, event=None):
     """Save control values and output references in the selected parameter set."""
 
-    if self._parameterNode is None or self._updatingGUIFromParameterNode:
+    if self._parameterNode is None or self._updatingGUIFromParameterNode or slicer.mrmlScene.IsImporting() or self._sceneImportPending:
       return
 
     wasModified = self._parameterNode.StartModify()
 
+    self.saveSegmentationSettings()
     self._parameterNode.SetNodeReferenceID(self.logic.OUTPUT_TRANSFORM_REF, self.ui.outputTransformComboBox.currentNodeID)
     self._parameterNode.SetNodeReferenceID(self.logic.OUTPUT_VOLUME_REF, self.ui.outputVolumeComboBox.currentNodeID)
     self._parameterNode.SetParameter(self.logic.LOSS_PARAM, self.ui.lossComboBox.currentText)
@@ -341,7 +384,7 @@ class UniGradICONWidget(ServerControls, RegistrationControls, ComparisonControls
 
   def updateImageSettingsFromGUI(self):
     """Store the selected images and their modalities in the settings (StagesJson)."""
-    if self._parameterNode is None or self._updatingGUIFromParameterNode:
+    if self._parameterNode is None or self._updatingGUIFromParameterNode or slicer.mrmlScene.IsImporting() or self._sceneImportPending:
       return
     presetParameters = json.loads(self._parameterNode.GetParameter(self.logic.SETTINGS_JSON_PARAM))
     presetParameters['image'].update(self.imageSettingsFromGUI())

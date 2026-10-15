@@ -10,11 +10,17 @@ set(MODULE_PYTHON_SCRIPTS
   UniGradICONLib/server.py
   UniGradICONLib/registration.py
   UniGradICONLib/comparison.py
+  UniGradICONLib/preview.py
+  UniGradICONLib/readiness.py
+  UniGradICONLib/segmentation.py
   UniGradICONTests/__init__.py
   UniGradICONTests/slicer_tests.py
+  UniGradICONTests/segmentation_tests.py
+  UniGradICONTests/workflow_tests.py
   UniGradICONHelpers/__init__.py
   UniGradICONHelpers/icon_helper.py
   UniGradICONHelpers/registration.py
+  UniGradICONHelpers/segmentation.py
   UniGradICONHelpers/remote.py
   UniGradICONHelpers/task.py
   UniGradICONHelpers/local_worker.py

@@ -16,6 +16,132 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from UniGradICONHelpers import registration
 
 
+def test_guidance_backend_requires_upstream_dice_api(monkeypatch):
+  import types
+  from UniGradICONHelpers import segmentation
+  monkeypatch.setitem(sys.modules, "unigradicon", types.SimpleNamespace(make_network=lambda shape: None))
+  assert not segmentation.guidance_available()
+  with pytest.raises(RuntimeError, match="Dice-loss support"):
+    segmentation.guidance_backend()
+  backend = types.SimpleNamespace(make_network=lambda shape, dice_loss_weight=0: None)
+  monkeypatch.setitem(sys.modules, "unigradicon", backend)
+  assert segmentation.guidance_backend() is backend
+
+
+def test_changing_dice_weight_reuses_guided_network_without_affecting_image_only_cache(monkeypatch, tmp_path):
+  import types
+  import torch
+  from UniGradICONHelpers import segmentation, icon_helper
+  class Model:
+    def __init__(self):
+      self.regis_net = types.SimpleNamespace(load_state_dict=lambda state: None)
+    def to(self, device):
+      pass
+    def eval(self):
+      pass
+  networks = []
+  def create(*args, **kwargs):
+    model = Model()
+    networks.append(model)
+    return model
+  monkeypatch.setattr(registration, "_models", {})
+  monkeypatch.setattr(registration, "ensure_weights", lambda *args: "weights.pth")
+  monkeypatch.setattr(torch, "load", lambda *args, **kwargs: {})
+  monkeypatch.setattr(segmentation, "guidance_backend", lambda: types.SimpleNamespace(make_network=create))
+  monkeypatch.setattr(segmentation, "masking_backend", lambda: types.SimpleNamespace(make_network=create))
+  monkeypatch.setattr(icon_helper, "make_network", create)
+  first = registration.load_model(str(tmp_path), "unigradicon", "LNCC", "CPU", dice_loss_weight=0.1)
+  second = registration.load_model(str(tmp_path), "unigradicon", "LNCC", "CPU", dice_loss_weight=0.5)
+  image_only = registration.load_model(str(tmp_path), "unigradicon", "LNCC", "CPU")
+  assert first is second and second.dice_loss_weight == 0.5
+  assert image_only is not second and len(networks) == 2
+  masked = registration.load_model(str(tmp_path), "unigradicon", "LNCC", "CPU", dice_loss_weight=0.5,
+                                    loss_function_masking=True)
+  no_dice = registration.load_model(str(tmp_path), "unigradicon", "LNCC", "CPU", loss_function_masking=True)
+  assert masked is no_dice and no_dice.dice_loss_weight == 0
+  assert no_dice.loss_function_masking and len(networks) == 3
+  assert image_only is not no_dice and second is not no_dice
+
+
+@pytest.mark.parametrize("mode", ["input", "loss"])
+def test_input_masking_changes_images_while_loss_masking_preserves_inputs(mode, monkeypatch):
+  import numpy as np
+  import itk
+  from UniGradICONHelpers import icon_helper
+  values = np.arange(216, dtype=np.float32).reshape(6, 6, 6) + 1
+  fixed = itk.image_from_array(values)
+  moving = itk.image_from_array(values * 2)
+  mask = np.zeros_like(values)
+  mask[1:5, 1:5, 1:5] = 1
+  labelmap = itk.image_from_array(mask)
+  expected = [np.array(icon_helper.preprocess(image, "MRI")) for image in (moving, fixed)]
+  captured = []
+  def pair(model, a, b, **kwargs):
+    captured.append((np.array(a), np.array(b), kwargs))
+    return "transform", None
+  monkeypatch.setattr(icon_helper, "register_pair", pair)
+  result = registration.register_images(None, fixed, moving, "MRI", "MRI", io_steps=1 if mode == "loss" else 0,
+                                       fixed_mask=labelmap, moving_mask=labelmap, input_masking=mode == "input",
+                                       loss_function_masking=mode == "loss", warp=False)
+  assert result == ("transform", None)
+  a, b, kwargs = captured[0]
+  for image, normalized in zip((a, b), expected):
+    np.testing.assert_allclose(image, normalized * mask if mode == "input" else normalized)
+  if mode == "loss":
+    np.testing.assert_array_equal(itk.array_from_image(kwargs["mask_A"]), mask)
+    np.testing.assert_array_equal(itk.array_from_image(kwargs["mask_B"]), mask)
+    assert np.any(a[mask == 0] != 0)
+  else:
+    assert "mask_A" not in kwargs and "mask_B" not in kwargs
+
+
+def test_loss_masking_cannot_run_without_masks_or_io():
+  with pytest.raises(ValueError, match="at least one IO step"):
+    registration.register_images(None, None, None, "MRI", "MRI", loss_function_masking=True, io_steps=0)
+  with pytest.raises(ValueError, match="both masks"):
+    registration.register_images(None, None, None, "MRI", "MRI", loss_function_masking=True, io_steps=1)
+
+
+def test_loss_masking_requires_compatible_upstream_api(monkeypatch):
+  import types
+  from UniGradICONHelpers import segmentation
+  monkeypatch.setitem(sys.modules, "unigradicon", types.SimpleNamespace(make_network=lambda shape, dice_loss_weight=0: None))
+  assert not segmentation.loss_masking_available()
+  with pytest.raises(RuntimeError, match="loss_function_masking support"):
+    segmentation.masking_backend()
+  backend = types.SimpleNamespace(make_network=lambda shape, dice_loss_weight=0, loss_function_masking=False: None)
+  monkeypatch.setitem(sys.modules, "unigradicon", backend)
+  assert segmentation.masking_backend() is backend
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_dice_inputs_reach_every_optimization_forward_and_weights_restore(fail):
+  import torch
+  from UniGradICONHelpers import icon_helper
+  seen = []
+  label = torch.ones((1, 1, 2, 2, 2))
+  class Model(torch.nn.Module):
+    def __init__(self):
+      super().__init__()
+      self.weight = torch.nn.Parameter(torch.tensor(1.0))
+    def forward(self, a, b, segmentation_A=None, segmentation_B=None):
+      assert segmentation_A is label and segmentation_B is label
+      seen.append(self.weight.item())
+      if fail and len(seen) == 2:
+        raise RuntimeError("guided failure")
+      return (self.weight.square(),)
+  model = Model()
+  args = dict(forward_kwargs={"segmentation_A": label, "segmentation_B": label})
+  if fail:
+    with pytest.raises(RuntimeError, match="guided failure"):
+      icon_helper.finetune_execute(model, label, label, 2, **args)
+  else:
+    icon_helper.finetune_execute(model, label, label, 2, **args)
+    assert len(seen) == 3
+  assert model.weight.item() == 1.0
+  assert seen[1] != seen[0]
+
+
 def test_upload_closes_already_open_files_when_another_input_is_missing(tmp_path, monkeypatch):
   from UniGradICONHelpers import remote
   image = tmp_path / "fixed.nrrd"
@@ -265,3 +391,46 @@ def test_registration_scopes_deterministic_convolutions(monkeypatch, fail):
       assert icon_helper.register_pair(None, None, None) == "result"
     assert not torch.backends.cudnn.deterministic
     assert torch.backends.cudnn.benchmark
+
+
+def test_multilabel_guidance_preserves_classes_and_grid(monkeypatch):
+  import numpy as np
+  import itk
+  from UniGradICONHelpers import icon_helper
+  values = np.arange(216, dtype=np.float32).reshape(6, 6, 6)
+  reference = itk.image_from_array(values)
+  labels = np.zeros(values.shape, np.uint32)
+  labels[1:3, 1:3, 1:3] = 2
+  labels[3:5, 3:5, 3:5] = 7
+  image = itk.image_from_array(labels)
+  seen = []
+  def pair(model, a, b, **kwargs):
+    seen.append(kwargs)
+    return "transform", None
+  monkeypatch.setattr(icon_helper, "register_pair", pair)
+  registration.register_images(None, reference, reference, "MRI", "MRI", io_steps=1, warp=False,
+                               fixed_segmentation=image, moving_segmentation=image)
+  np.testing.assert_array_equal(itk.array_from_image(seen[0]["segmentation_A"]), labels)
+  image.SetOrigin((1, 0, 0))
+  result = itk.array_from_image(registration.labels_on(image, reference))
+  expected = np.zeros_like(labels)
+  expected[:, :, 1:] = labels[:, :, :-1]
+  np.testing.assert_array_equal(result, expected)
+  assert set(np.unique(result)) == {0, 2, 7}
+
+
+def test_sparse_label_ids_are_compacted_without_merging_classes():
+  import numpy as np
+  from UniGradICONHelpers.segmentation import compact_label_pair
+  a, b = compact_label_pair(np.array([0, 2, 2147483647, 9]), np.array([0, 2147483647, 2, 8]))
+  np.testing.assert_array_equal(a, [0, 1, 2, 0])
+  np.testing.assert_array_equal(b, [0, 2, 1, 0])
+  with pytest.raises(ValueError, match="shared non-background"):
+    compact_label_pair(np.array([0, 2]), np.array([0, 7]))
+
+
+@pytest.mark.parametrize("value", [-1, 0.5, float("nan"), float("inf"), 2147483648])
+def test_invalid_segmentation_label_values_are_rejected(value):
+  from UniGradICONHelpers.segmentation import label_values
+  with pytest.raises(ValueError, match="nonnegative integers"):
+    label_values([0, value])

@@ -128,9 +128,9 @@
             <widget class="QToolButton" name="remoteServerButton">
              <property name="styleSheet">
               <string notr="true">QToolButton:checked {
-    background-color: green;
-    border-color: darkgreen;
-}</string>
+        background-color: green;
+        border-color: darkgreen;
+    }</string>
              </property>
              <property name="toolTip">
               <string>Connect to the server and read the devices it offers.</string>
@@ -285,6 +285,48 @@
         </item>
        </widget>
       </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="backendLabel">
+        <property name="text">
+         <string>Backend:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1" colspan="2">
+       <widget class="QFrame" name="backendControlsFrame">
+        <layout class="QHBoxLayout" name="backendControlsLayout">
+         <property name="leftMargin">
+          <number>0</number>
+         </property>
+         <property name="rightMargin">
+          <number>0</number>
+         </property>
+         <property name="topMargin">
+          <number>0</number>
+         </property>
+         <property name="bottomMargin">
+          <number>0</number>
+         </property>
+         <item>
+          <widget class="QPushButton" name="checkBackendButton">
+           <property name="text">
+            <string>Check backend</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="backendStatusLabel">
+           <property name="text">
+            <string>Checking backend…</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -395,6 +437,295 @@
      <property name="text">
       <string>Registration settings</string>
      </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="segmentationCollapsibleButton">
+     <property name="text">
+      <string>Masks and segmentations (optional)</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <layout class="QVBoxLayout" name="segmentationLayout">
+      <item>
+       <layout class="QFormLayout" name="maskingChoiceLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="maskingModeLabel">
+          <property name="text">
+           <string>Masking mode:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="maskingModeComboBox" />
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QGroupBox" name="maskInputsWidget">
+        <property name="title">
+         <string>Mask inputs</string>
+        </property>
+        <layout class="QFormLayout" name="maskInputsWidgetLayout">
+         <item row="0" column="0">
+          <widget class="QLabel" name="fixedMaskLabel">
+           <property name="text">
+            <string>Fixed mask:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="qMRMLNodeComboBox" name="fixedMaskSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+             <string>vtkMRMLLabelMapVolumeNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="toolTip">
+            <string>Nonzero labelmap voxels are foreground. For a segmentation, all segments are combined into one binary mask.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="movingMaskLabel">
+           <property name="text">
+            <string>Moving mask:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="qMRMLNodeComboBox" name="movingMaskSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+             <string>vtkMRMLLabelMapVolumeNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="toolTip">
+            <string>Nonzero labelmap voxels are foreground. For a segmentation, all segments are combined into one binary mask.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="0" colspan="2">
+          <widget class="QPushButton" name="previewMasksButton">
+           <property name="text">
+            <string>Preview masks</string>
+           </property>
+           <property name="checkable">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="diceGuidanceCheckBox">
+        <property name="text">
+         <string>Use segmentation guidance during IO</string>
+        </property>
+        <property name="toolTip">
+         <string>Add Dice loss to align corresponding anatomy during instance optimization. Requires positive IO steps and a compatible uniGradICON backend.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QGroupBox" name="guidanceInputsWidget">
+        <property name="title">
+         <string>IO segmentations</string>
+        </property>
+        <layout class="QFormLayout" name="guidanceInputsWidgetLayout">
+         <item row="0" column="0">
+          <widget class="QLabel" name="fixedSegmentationLabel">
+           <property name="text">
+            <string>Fixed segmentation:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="qMRMLNodeComboBox" name="fixedSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+             <string>vtkMRMLLabelMapVolumeNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="movingSegmentationLabel">
+           <property name="text">
+            <string>Moving segmentation:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="qMRMLNodeComboBox" name="movingSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+             <string>vtkMRMLLabelMapVolumeNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="0">
+          <widget class="QLabel" name="diceWeightLabel">
+           <property name="text">
+            <string>Dice loss weight:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="1">
+          <widget class="QDoubleSpinBox" name="diceWeightSpinBox">
+           <property name="minimum">
+            <double>0.001</double>
+           </property>
+           <property name="maximum">
+            <double>100</double>
+           </property>
+           <property name="value">
+            <double>10</double>
+           </property>
+           <property name="singleStep">
+            <double>1</double>
+           </property>
+           <property name="decimals">
+            <number>3</number>
+           </property>
+          </widget>
+         </item>
+         <item row="4" column="0" colspan="2">
+          <widget class="QPushButton" name="previewGuidanceButton">
+           <property name="text">
+            <string>Preview IO segmentations</string>
+           </property>
+           <property name="checkable">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="propagateSegmentationCheckBox">
+        <property name="text">
+         <string>Create transformed moving segmentation</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QGroupBox" name="propagationInputsWidget">
+        <property name="title">
+         <string>Segmentation propagation</string>
+        </property>
+        <layout class="QFormLayout" name="propagationInputsWidgetLayout">
+         <item row="0" column="0">
+          <widget class="QLabel" name="propagationSegmentationLabel">
+           <property name="text">
+            <string>Moving segmentation:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="qMRMLNodeComboBox" name="propagationSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>false</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="outputSegmentationLabel">
+           <property name="text">
+            <string>Transformed segmentation:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="qMRMLNodeComboBox" name="outputSegmentationComboBox">
+           <property name="nodeTypes">
+            <stringlist>
+             <string>vtkMRMLSegmentationNode</string>
+            </stringlist>
+           </property>
+           <property name="noneEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="addEnabled">
+            <bool>true</bool>
+           </property>
+           <property name="removeEnabled">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="inputPreviewStatusLabel">
+        <property name="text">
+         <string />
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
    <item>
@@ -621,6 +952,19 @@
            </property>
            <property name="toolTip">
             <string>Number of alternating tiles along each fixed-image axis. More tiles make smaller checks. Counts are limited by the image dimensions.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="1">
+          <widget class="QCheckBox" name="comparisonSegmentationsCheckBox">
+           <property name="text">
+            <string>Show segmentations</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+           <property name="toolTip">
+            <string>Temporarily hide segmentation and labelmap overlays in the slice views. Showing them restores their previous visibility.</string>
            </property>
           </widget>
          </item>
@@ -956,5 +1300,26 @@
     </hint>
    </hints>
   </connection>
+  <connection>
+   <sender>UniGradICON</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>fixedSegmentationComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
+  <connection>
+   <sender>UniGradICON</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>movingSegmentationComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
+  <connection>
+   <sender>UniGradICON</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>outputSegmentationComboBox</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
+  <connection><sender>UniGradICON</sender><signal>mrmlSceneChanged(vtkMRMLScene*)</signal><receiver>fixedMaskSegmentationComboBox</receiver><slot>setMRMLScene(vtkMRMLScene*)</slot></connection>
+  <connection><sender>UniGradICON</sender><signal>mrmlSceneChanged(vtkMRMLScene*)</signal><receiver>movingMaskSegmentationComboBox</receiver><slot>setMRMLScene(vtkMRMLScene*)</slot></connection>
+  <connection><sender>UniGradICON</sender><signal>mrmlSceneChanged(vtkMRMLScene*)</signal><receiver>propagationSegmentationComboBox</receiver><slot>setMRMLScene(vtkMRMLScene*)</slot></connection>
  </connections>
 </ui>

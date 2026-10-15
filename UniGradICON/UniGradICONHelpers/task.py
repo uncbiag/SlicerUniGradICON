@@ -68,6 +68,7 @@ class RegistrationTask:
     try:
       import SimpleITK as sitk
       self.report(phase="Preparing images")
+      reference = self.images["fixed"]
       paths = {}
       for role, image in self.images.items():
         self.check_cancelled()
@@ -85,8 +86,14 @@ class RegistrationTask:
         sitk.WriteTransform(sitk.ReadTransform(transform), binary_transform)
         transform = binary_transform
       warped_image = sitk.ReadImage(warped) if warped else None
+      result = (transform, warped_image)
+      propagation = [path for key, path in paths.items() if key.startswith("propagation_")]
+      if propagation:
+        from .segmentation import propagate
+        self.report(phase="Transforming segmentation")
+        result += (propagate(propagation, reference, transform, self.check_cancelled),)
       self.check_cancelled()
-      self.events.put(("result", (transform, warped_image)))
+      self.events.put(("result", result))
     except registration.RegistrationCancelled:
       self.cleanup()
       self.events.put(("cancelled", None))
@@ -106,9 +113,13 @@ class RegistrationTask:
 
   def _local(self, paths):
     arguments = dict(self.settings)
+    arguments.pop("multilabel_segmentation", None)
     arguments["model_name"] = arguments.pop("model")
     arguments.update(fixed_path=paths["fixed"], moving_path=paths["moving"],
                      weights_dir=self.weights_dir, out_dir=self.directory, transform_format="h5")
+    for role in ("fixed_mask", "moving_mask", "fixed_segmentation", "moving_segmentation"):
+      if role in paths:
+        arguments[role + "_path"] = paths[role]
     manifest_path = os.path.join(self.directory, "job.json")
     with open(manifest_path, "w") as file:
       json.dump({"arguments": arguments, "parent_pid": os.getpid()}, file)
@@ -182,11 +193,15 @@ class RegistrationTask:
     try:
       self.report(phase="Connecting")
       info = client.info()
+      from .segmentation import require_server_features
+      require_server_features(info, self.settings)
       if self.settings["device"] not in info["devices"]:
         raise ValueError(f"The server does not offer {self.settings['device']}. Select an available device.")
       self.check_cancelled()
       self.report(phase="Uploading images")
-      job_id = client.submit(paths["fixed"], paths["moving"], self.settings)["id"]
+      uploads = {role + "_path": paths[role] for role in
+                 ("fixed_mask", "moving_mask", "fixed_segmentation", "moving_segmentation") if role in paths}
+      job_id = client.submit(paths["fixed"], paths["moving"], self.settings, **uploads)["id"]
       failures = 0
       while True:
         self.check_cancelled()

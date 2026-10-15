@@ -87,11 +87,16 @@ class RegistrationServerClient:
       raise ServerError(f"{self.url} is not a UniGradICON registration server.")
     return info
 
-  def submit(self, fixed_path, moving_path, params, fixed_mask_path=None):
-    """Upload the two images, and the fixed image mask if there is one; returns the job status."""
+  def submit(self, fixed_path, moving_path, params, fixed_mask_path=None,
+             fixed_segmentation_path=None, moving_segmentation_path=None, moving_mask_path=None):
+    """Upload images and optional mask/guidance labels; returns the job status."""
     paths = {"fixed": fixed_path, "moving": moving_path}
     if fixed_mask_path:
       paths["fixed_mask"] = fixed_mask_path
+    for role, path in (("fixed_segmentation", fixed_segmentation_path), ("moving_segmentation", moving_segmentation_path),
+                       ("moving_mask", moving_mask_path)):
+      if path:
+        paths[role] = path
     # Reuse the submission UUID on every retry, including when only the response was lost.
     return self._request("POST", "/jobs", timeout=UPLOAD_TIMEOUT, connectTimeout=TRANSFER_CONNECT_TIMEOUT,
                          retryDelays=TRANSFER_RETRY_DELAYS, filePaths=paths,

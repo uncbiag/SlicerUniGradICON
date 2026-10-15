@@ -210,8 +210,9 @@ def preprocess(image, modality="CT/CBCT", segmentation=None):
         raise ValueError(f"{modality} image has no intensity variation after preprocessing or masking. Check the image and mask.")
     return image
 
-def finetune_execute(model, image_A, image_B, steps, call_back=None):
+def finetune_execute(model, image_A, image_B, steps, call_back=None, forward_kwargs=None):
     """Optimize this pair, restoring cached weights after success, cancellation, or failure."""
+    forward_kwargs = forward_kwargs or {}
     state_dict = copy.deepcopy(model.state_dict())
     try:
         optimizer = torch.optim.Adam(model.parameters(), lr=0.00002)
@@ -224,17 +225,17 @@ def finetune_execute(model, image_A, image_B, steps, call_back=None):
                     remaining = (t.total - t.n) / rate if rate and t.total else 0  # Seconds*
                     call_back(steps, step, elapsed, remaining)
                 optimizer.zero_grad()
-                loss_tuple = model(image_A, image_B)
+                loss_tuple = model(image_A, image_B, **forward_kwargs)
                 loss_tuple[0].backward()
                 optimizer.step()
         with torch.no_grad():
-            loss = model(image_A, image_B)
+            loss = model(image_A, image_B, **forward_kwargs)
     finally:
         model.load_state_dict(state_dict)
     return loss
     
 def register_pair(
-    model, image_A, image_B, finetune_steps=None, call_back=None
+    model, image_A, image_B, finetune_steps=None, call_back=None, segmentation_A=None, segmentation_B=None, mask_A=None, mask_B=None
 ) -> "(itk.CompositeTransform, itk.CompositeTransform)":
     # Benchmarking may select a nondeterministic convolution algorithm. Even
     # submicron transform changes can flip samples across the image boundary
@@ -246,11 +247,19 @@ def register_pair(
         deterministic=True,
         allow_tf32=torch.backends.cudnn.allow_tf32,
     ):
-        return _register_pair(model, image_A, image_B, finetune_steps, call_back)
+        if segmentation_A is None and segmentation_B is None and mask_A is None and mask_B is None:
+            return _register_pair(model, image_A, image_B, finetune_steps, call_back)
+        from icon_registration import config
+        previous_device = config.device
+        try:
+            config.device = torch.device(model.device)
+            return _register_pair(model, image_A, image_B, finetune_steps, call_back, segmentation_A, segmentation_B, mask_A, mask_B)
+        finally:
+            config.device = previous_device
 
 
 def _register_pair(
-    model, image_A, image_B, finetune_steps=None, call_back=None
+    model, image_A, image_B, finetune_steps=None, call_back=None, segmentation_A=None, segmentation_B=None, mask_A=None, mask_B=None
 ) -> "(itk.CompositeTransform, itk.CompositeTransform)":
 
     assert isinstance(image_A, itk.Image)
@@ -276,14 +285,31 @@ def _register_pair(
     B_resized = F.interpolate(
         B_trch, size=shape[2:], mode="trilinear", align_corners=False
     )
+    if segmentation_A is not None and segmentation_B is not None:
+        from .segmentation import compact_label_pair
+        segmentation_A, segmentation_B = compact_label_pair(np.array(segmentation_A), np.array(segmentation_B))
+    forward_kwargs = {}
+    for name, segmentation in (("segmentation_A", segmentation_A), ("segmentation_B", segmentation_B),
+                               ("mask_A", mask_A), ("mask_B", mask_B)):
+        if segmentation is not None:
+            tensor = torch.as_tensor(np.array(segmentation), dtype=torch.float32, device=model.device)[None, None]
+            resized = F.interpolate(tensor, size=shape[2:], mode="nearest")
+            if not torch.any(resized > 0):
+                raise ValueError("A selected mask or segmentation vanished at model resolution. Use larger foreground regions.")
+            forward_kwargs[name] = resized
+    if "segmentation_A" in forward_kwargs:
+        shared = set(torch.unique(forward_kwargs["segmentation_A"]).tolist()) & set(torch.unique(forward_kwargs["segmentation_B"]).tolist())
+        if not shared - {0}:
+            raise ValueError("No shared segmentation labels remain at model resolution. Use larger corresponding regions.")
     if finetune_steps == 0:
         raise Exception("To indicate no finetune_steps, pass finetune_steps=None")
 
     if finetune_steps == None:
         with torch.no_grad():
-            loss = model(A_resized, B_resized)
+            loss = model(A_resized, B_resized, **forward_kwargs)
     else:
-        loss = finetune_execute(model, A_resized, B_resized, finetune_steps, call_back)
+        options = {"forward_kwargs": forward_kwargs} if forward_kwargs else {}
+        loss = finetune_execute(model, A_resized, B_resized, finetune_steps, call_back, **options)
 
     # phi_AB and phi_BA are [1, 3, H, W, D] pytorch tensors representing the forward and backward
     # maps computed by the model

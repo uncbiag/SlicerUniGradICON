@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import sys
 
 import numpy as np
 import qt
@@ -34,10 +35,18 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
   def runTest(self):
     for test in (self.test_parameterSetInputs, self.test_remoteResultDownloads,
                  self.test_interactiveRegistrationFlow, self.test_checkerboardComparison,
-                 self.test_reviewRegressions, self.test_UniGradICON, self.test_remote,
+                 self.test_reviewRegressions, self.test_segmentationSupport, self.test_registrationWorkflow, self.test_UniGradICON, self.test_remote,
                  self.test_parameterNodeRegistration):
       self.setUp()
       test()
+
+  def test_registrationWorkflow(self):
+    from UniGradICONTests.workflow_tests import run_tests
+    run_tests(self)
+
+  def test_segmentationSupport(self):
+    from UniGradICONTests.segmentation_tests import run_tests
+    run_tests(self)
 
   def test_interactiveRegistrationFlow(self):
     """Automatic outputs, locking, cancellation, progress, comparison and recovery."""
@@ -154,6 +163,7 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
     """Native asynchronous checkerboard: both images, geometry, tile count and cleanup."""
     import time
     from unittest.mock import patch
+    slicer.util.selectModule("UniGradICON")
     widget = slicer.modules.unigradicon.widgetRepresentation().self()
     widget.initializeParameterNode()
     nodes = []
@@ -206,6 +216,44 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
       verify(output, (100, 300), 2)
       layers.assert_called_with(background=output, foreground=None)
       self.assertTrue(widget.ui.compareResultButton.checked)
+      segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Comparison labels")
+      segmentation.CreateDefaultDisplayNodes()
+      display = segmentation.GetDisplayNode()
+      display.SetVisibility2D(True)
+      display.SetVisibility3D(False)
+      hidden = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Already hidden labels")
+      hidden.CreateDefaultDisplayNodes()
+      hidden.GetDisplayNode().SetVisibility2D(False)
+      label_view = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSliceCompositeNode", "Label overlay visibility")
+      label_view.SetLabelOpacity(0.35)
+      widget.ui.comparisonSegmentationsCheckBox.checked = False
+      self.assertFalse(display.GetVisibility2D())
+      self.assertFalse(display.GetVisibility3D())
+      self.assertEqual(label_view.GetLabelOpacity(), 0)
+      added = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Labels added during comparison")
+      added.CreateDefaultDisplayNodes()
+      slicer.app.processEvents()
+      self.assertFalse(added.GetDisplayNode().GetVisibility2D())
+      widget.updateComparisonSegmentations()
+      widget.ui.comparisonSegmentationsCheckBox.checked = True
+      self.assertTrue(display.GetVisibility2D())
+      self.assertTrue(added.GetDisplayNode().GetVisibility2D())
+      self.assertFalse(hidden.GetDisplayNode().GetVisibility2D())
+      self.assertAlmostEqual(label_view.GetLabelOpacity(), 0.35)
+      widget.ui.comparisonSegmentationsCheckBox.checked = False
+      widget.onSceneStartSave(None, None)
+      self.assertTrue(display.GetVisibility2D())
+      self.assertAlmostEqual(label_view.GetLabelOpacity(), 0.35)
+      widget.onSceneEndSave(None, None)
+      self.assertFalse(display.GetVisibility2D())
+      self.assertEqual(label_view.GetLabelOpacity(), 0)
+      slicer.util.selectModule("Data")
+      self.assertTrue(display.GetVisibility2D())
+      widget.onSceneStartSave(None, None)
+      widget.onSceneEndSave(None, None)
+      self.assertTrue(display.GetVisibility2D(), "Saving from another module must not hide labels")
+      slicer.util.selectModule("UniGradICON")
+      self.assertFalse(display.GetVisibility2D())
       # Saving must serialize real image references while leaving the live preview intact.
       import tempfile
       import zipfile
@@ -230,7 +278,13 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
       output = wait()
       verify(output, (100, 300), 4)
       widget.ui.comparisonModeComboBox.currentText = "Overlay"
+      self.assertTrue(display.GetVisibility2D())
+      self.assertFalse(hidden.GetDisplayNode().GetVisibility2D())
+      self.assertAlmostEqual(label_view.GetLabelOpacity(), 0.35)
+      self.assertTrue(widget.ui.comparisonSegmentationsCheckBox.isHidden())
       self.assertIsNone(widget._checkerboardNode)
+      self.assertTrue(display.GetVisibility2D())
+      self.assertFalse(widget._comparisonSegmentationVisibility)
       self.assertIsNone(output.GetScene())
       layers.assert_called_with(background=fixed, foreground=registered, foregroundOpacity=0.5)
       widget.ui.comparisonModeComboBox.currentText = "Checkerboard"
@@ -247,6 +301,7 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
       self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 3)
       self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeDisplayNode")), 3)
     widget._completedResult = None
+    widget.ui.comparisonSegmentationsCheckBox.checked = True
     widget.ui.comparisonModeComboBox.currentText = "Overlay"
     widget.updateRegistrationGUI()
 
@@ -333,6 +388,21 @@ class UniGradICONTest(ScriptedLoadableModuleTest):
       self.assertIsNone(widget._registrationTask)
       task.assert_not_called()
       self.assertIn("cancelled", widget.ui.registrationStatusLabel.text)
+    from UniGradICONLib import logic as logic_module
+    upgrade_logic = logic_module.UniGradICONLogic()
+    with patch.object(logic_module, "backend_packages_current", return_value=False), \
+         patch.object(slicer.util, "confirmOkCancelDisplay", return_value=True), \
+         patch.object(slicer.util, "pip_install") as install, \
+         patch.dict(sys.modules, {"unigradicon": __import__("types").SimpleNamespace()}):
+      with self.assertRaisesRegex(RuntimeError, "Restart Slicer"):
+        upgrade_logic.ensureLocalBackend()
+      install.assert_called_once_with("unigradicon==1.0.6")
+    with patch.object(logic_module, "backend_packages_current", return_value=True), \
+         patch.object(slicer.util, "pip_install") as install:
+      with self.assertRaisesRegex(RuntimeError, "Restart Slicer"):
+        upgrade_logic.ensureLocalBackend()
+      install.assert_not_called()
+    self.assertFalse(upgrade_logic._localBackendReady)
     self.assertEqual(widget.ui.runRegistrationButton.parent(), widget.ui.registrationRunFrame)
     self.assertEqual(widget.ui.progressBar.parent(), widget.ui.registrationRunFrame)
     self.assertEqual(widget.ui.time.parent(), widget.ui.registrationRunFrame)
