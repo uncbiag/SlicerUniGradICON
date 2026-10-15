@@ -2,7 +2,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2403.05780-b31b1b.svg)](https://arxiv.org/abs/2403.05780) [![arXiv](https://img.shields.io/badge/arXiv-2408.00221-b31b1b.svg)](https://arxiv.org/abs/2408.00221) 
 
-This is the official Slicer Extension for `uniGradICON`: A Foundation Model for Medical Image Registration, and `multiGradICON`: A Foundation Model for Multimodal Medical Image Registration. The extension provides a Slicer interface for the models, allowing users to perform image registration tasks using the models. The official repository for the models can be found [here](https://github.com/uncbiag/uniGradICON).
+This is the official Slicer extension for [uniGradICON and multiGradICON](https://github.com/uncbiag/uniGradICON), foundation models for medical image registration.
 
 **uniGradICON: A Foundation Model for Medical Image Registration**  
 Tian, Lin and Greer, Hastings and Kwitt, Roland and Vialard, Francois-Xavier and Estepar, Raul San Jose and Bouix, Sylvain and Rushmore, Richard and Niethammer, Marc  
@@ -59,11 +59,11 @@ A server can also run without Slicer using Python, a compatible PyTorch installa
 
 1. Select the fixed and moving scalar images, and their modality (MRI or CT/CBCT). The extension preprocesses their intensities automatically. Linear parent transforms are included in the input world geometry. Harden nonlinear parent transforms in Slicer before registration; they are rejected rather than silently ignored.
 
-2. The extension provides two models: `uniGradICON` and `multiGradICON`. Both models have the same interface and can be used to perform image registration tasks. The user can select the desired model from a drop-down menu.
+2. Select `uniGradICON` or `multiGradICON` from the model menu.
 
-3. Additionally, the user can specify the number of iterations for the instance optimization (IO steps) process. The default value is set to 0 iterations. However, we recommend using at least 50 iterations for more challenging registration tasks.
+3. Set the instance optimization (**IO steps**) count. The default is **0**. For challenging registrations, we recommend at least 50 steps.
 
-4. The user can also select the similarity loss function that will be used during the optimization process. The available similarity losses are:
+4. Choose a similarity loss for instance optimization:
     - Localized Normalized Cross-Correlation (LNCC)
     - Squared Localized Normalized Cross-Correlation (Squared LNCC)
     - Modality Independent Neighborhood Descriptor (MIND - SSC)
@@ -153,14 +153,6 @@ parents first. Masks and segmentation labels must overlap their image and retain
 foreground at model resolution. Propagation does not require Dice guidance or a
 transformed intensity volume. Remote jobs upload only the masks and IO labels they
 need; propagation uses the returned transform locally.
-
-For the scripting API's `registerVolumesUsingParameterNode`, masking and Dice
-guidance require any initial transform to be applied and hardened on the moving
-image and its corresponding masks/segmentations before calling. Do not pass a
-separate `initialTransformNode` with these options.
-
-This provides pair-specific registration and instance optimization. Dataset-level
-model finetuning remains a separate upstream workflow.
 
 ## Troubleshooting
 
