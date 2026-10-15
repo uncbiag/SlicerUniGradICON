@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))  # for UniGradICONHelpers
@@ -40,10 +41,11 @@ DEFAULT_PORT = 8899
 DEFAULT_WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(HERE)), "model_checkpoints")
 TOKEN_ENVIRONMENT_VARIABLE = "UNIGRADICON_SERVER_TOKEN"
 JOB_LIFETIME_SECONDS = 3600  # finished jobs and their files are removed after this
+JOB_CLEANUP_INTERVAL_SECONDS = 30
 MODALITIES = ("MRI", "CT/CBCT")
 LOSSES = ("LNCC", "Squared LNCC", "MIND-SSC")
 MAX_IO_STEPS = 1000
-IMAGE_SUFFIXES = (".nrrd", ".nhdr", ".nii.gz", ".nii", ".mha", ".mhd")
+IMAGE_SUFFIXES = (".nrrd", ".nii.gz", ".nii", ".mha")
 
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed", "cancelled"
 FINISHED_STATES = (DONE, FAILED, CANCELLED)
@@ -57,15 +59,18 @@ class Job:
     self.directory = directory
     self.state = QUEUED
     self.progress = None
+    self.phase = "Queued"
     self.error = None
     self.finished = None
     self.cancel = threading.Event()
     self.transform_path = None
     self.warped_path = None
     self.fixed_mask_path = None
+    self.request_id = None
 
   def status(self, position=None):
-    status = {"id": self.id, "state": self.state, "progress": self.progress, "error": self.error}
+    status = {"id": self.id, "state": self.state, "phase": self.phase,
+              "progress": self.progress, "error": self.error}
     if position is not None:
       status["queuePosition"] = position
     return status
@@ -101,6 +106,7 @@ class ProcessRegistrationRunner:
   def stop(self):
     if self.process is not None and self.process.is_alive():
       self.process.terminate()
+      self.process.join(timeout=2)
 
   def _ensure_process(self):
     if self.process is not None and self.process.is_alive():
@@ -128,6 +134,9 @@ class ProcessRegistrationRunner:
         continue
       if kind == "progress":
         job.progress = payload
+      elif kind == "phase":
+        job.phase = payload
+        job.progress = None
       elif kind == "done":
         return payload
       elif kind == "cancelled":
@@ -138,6 +147,9 @@ class ProcessRegistrationRunner:
 
 def image_suffix(file_name):
   lower = (file_name or "").lower()
+  if lower.endswith((".nhdr", ".mhd")):
+    raise HTTPException(400, "Detached image headers (.nhdr/.mhd) require companion data files. "
+                            "Convert the image to a self-contained .nrrd, .nii.gz, .nii or .mha before uploading.")
   for suffix in IMAGE_SUFFIXES:
     if lower.endswith(suffix):
       return suffix
@@ -145,13 +157,20 @@ def image_suffix(file_name):
 
 
 def validate_params(params, devices):
+  if not isinstance(params, dict):
+    raise HTTPException(400, "'params' must be a JSON object")
+
   def choice(name, allowed):
+    allowed = tuple(allowed)
     if params.get(name) not in allowed:
       raise HTTPException(400, f"'{name}' must be one of {list(allowed)}, not {params.get(name)!r}")
     return params[name]
 
+  raw_steps = params.get("io_steps", 0)
+  if isinstance(raw_steps, bool) or not isinstance(raw_steps, (int, str)):
+    raise HTTPException(400, "'io_steps' must be an integer")
   try:
-    io_steps = int(params.get("io_steps", 0))
+    io_steps = int(raw_steps)
   except (TypeError, ValueError):
     raise HTTPException(400, "'io_steps' must be an integer")
   if not 0 <= io_steps <= MAX_IO_STEPS:
@@ -172,12 +191,44 @@ def validate_params(params, devices):
 
 def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devices=None, jobs_per_gpu=1, gpus=None):
   """The server application. ``register``, ``devices`` and ``gpus`` (their number) are replaceable for testing."""
-  app = FastAPI(title="UniGradICON registration server")
   jobs = {}
+  submissions = {}  # submission UUID -> job, retained for the lifetime of the job
   pending = {registration.DEVICE_CPU: queue.Queue(), registration.DEVICE_GPU: queue.Queue()}
   lock = threading.Lock()
+  stopping = threading.Event()
+  workers = {device: [] for device in pending}
   work_root = tempfile.mkdtemp(prefix="unigradicon-server-")
   device_list = devices
+
+  @asynccontextmanager
+  async def lifespan(app):
+    try:
+      cleanup_thread.start()
+      worker(registration.DEVICE_CPU)
+      for gpu in range(gpu_total):
+        for _ in range(jobs_per_gpu):
+          worker(registration.DEVICE_GPU, gpu)
+      yield
+    finally:
+      stopping.set()
+      with lock:
+        for job in jobs.values():
+          job.cancel.set()
+      for runner in runners:
+        if hasattr(runner, "stop"):
+          runner.stop()
+      for device, threads in workers.items():
+        for _ in threads:
+          pending[device].put(None)
+      cleanup_thread.join(timeout=2)
+      worker_threads = [thread for threads in workers.values() for thread in threads]
+      for thread in worker_threads:
+        thread.join(timeout=2)
+      # A custom threaded runner may still be finishing; do not delete its inputs.
+      if not any(thread.is_alive() for thread in worker_threads):
+        shutil.rmtree(work_root, ignore_errors=True)
+
+  app = FastAPI(title="UniGradICON registration server", lifespan=lifespan)
 
   def server_devices():
     nonlocal device_list
@@ -192,19 +243,28 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
   def remove_job(job):
     shutil.rmtree(job.directory, ignore_errors=True)
     jobs.pop(job.id, None)
+    if job.request_id is not None:
+      submissions.pop(job.request_id, None)
 
   def remove_expired_jobs():
     now = time.time()
     with lock:
       for job in list(jobs.values()):
-        if job.state in FINISHED_STATES and job.finished and now - job.finished > JOB_LIFETIME_SECONDS:
+        if job.state in FINISHED_STATES and job.finished is not None and now - job.finished > JOB_LIFETIME_SECONDS:
           remove_job(job)
+
+  def cleanup_loop():
+    while not stopping.wait(JOB_CLEANUP_INTERVAL_SECONDS):
+      remove_expired_jobs()
+
+  cleanup_thread = threading.Thread(target=cleanup_loop, name="registration-cleanup", daemon=True)
 
   def queue_position(job):
     if job.state != QUEUED:
       return None
-    return sum(1 for other in jobs.values() if other.state == QUEUED and other.order < job.order
-               and other.params["device"] == job.params["device"])
+    with lock:
+      return sum(1 for other in jobs.values() if other.state == QUEUED and other.order < job.order
+                 and other.params["device"] == job.params["device"])
 
   def run_job(job, runner, place):
     params = job.params
@@ -240,23 +300,25 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
     place = device if gpu is None else f"{device} {gpu}"
 
     def loop():
-      while True:
+      while not stopping.is_set():
         job = pending[device].get()
-        if job.cancel.is_set():
-          continue  # cancelled while queued; already removed
-        job.state = RUNNING
+        if job is None:
+          break
+        with lock:
+          if job.cancel.is_set():
+            continue  # cancelled while queued; already removed
+          job.state = RUNNING
+          job.phase = "Registering"
         run_job(job, runner, place)
 
-    threading.Thread(target=loop, name=f"registration-worker-{place}", daemon=True).start()
+    thread = threading.Thread(target=loop, name=f"registration-worker-{place}", daemon=True)
+    workers[device].append(thread)
+    thread.start()
 
   runners = []
-  worker(registration.DEVICE_CPU)
   gpu_total = 0
   if registration.DEVICE_GPU in server_devices():
     gpu_total = registration.gpu_count() if gpus is None else gpus
-    for gpu in range(gpu_total):
-      for _ in range(jobs_per_gpu):
-        worker(registration.DEVICE_GPU, gpu)
   app.state.runners = runners
   if gpu_total:
     logging.info("Registrations run one at a time on the CPU and %d at a time on each of %d GPU(s).",
@@ -284,26 +346,60 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
 
   @app.post("/jobs", dependencies=[Depends(check_token)])
   def submit(fixed: UploadFile = File(...), moving: UploadFile = File(...), params: str = Form(...),
-             fixed_mask: UploadFile = File(None)):
+             fixed_mask: UploadFile = File(None), request_id: str = Form(None)):
     remove_expired_jobs()
     try:
       raw_params = json.loads(params)
     except json.JSONDecodeError:
       raise HTTPException(400, "'params' must be JSON")
     job_params = validate_params(raw_params, server_devices())
-    job = Job(job_params, tempfile.mkdtemp(dir=work_root), next(order))
-    job.fixed_path = os.path.join(job.directory, "fixed" + image_suffix(fixed.filename))
-    job.moving_path = os.path.join(job.directory, "moving" + image_suffix(moving.filename))
-    uploads = [(fixed, job.fixed_path), (moving, job.moving_path)]
-    if fixed_mask is not None:
-      job.fixed_mask_path = os.path.join(job.directory, "fixed_mask" + image_suffix(fixed_mask.filename))
-      uploads.append((fixed_mask, job.fixed_mask_path))
-    for upload, path in uploads:
-      with open(path, "wb") as f:
-        shutil.copyfileobj(upload.file, f)
+    if request_id is not None:
+      try:
+        request_id = uuid.UUID(request_id).hex
+      except ValueError:
+        raise HTTPException(400, "'request_id' must be a UUID")
+
+    def previous_submission():
+      # Called with lock held, including a second check after copying the uploads.
+      previous = submissions.get(request_id) if request_id is not None else None
+      if previous is not None and previous.params != job_params:
+        raise HTTPException(409, "'request_id' was already used with different registration parameters")
+      return previous
+
     with lock:
-      jobs[job.id] = job
-    pending[job_params["device"]].put(job)
+      previous = previous_submission()
+    if previous is not None:
+      return previous.status(queue_position(previous))
+
+    # Validate every name before allocating storage; all failed copies are cleaned up below.
+    uploads = [(fixed, "fixed" + image_suffix(fixed.filename)),
+               (moving, "moving" + image_suffix(moving.filename))]
+    if fixed_mask is not None:
+      uploads.append((fixed_mask, "fixed_mask" + image_suffix(fixed_mask.filename)))
+    job = Job(job_params, tempfile.mkdtemp(dir=work_root), next(order))
+    job.request_id = request_id
+    job.fixed_path = os.path.join(job.directory, uploads[0][1])
+    job.moving_path = os.path.join(job.directory, uploads[1][1])
+    if fixed_mask is not None:
+      job.fixed_mask_path = os.path.join(job.directory, uploads[2][1])
+    published = False
+    try:
+      for upload, name in uploads:
+        with open(os.path.join(job.directory, name), "wb") as f:
+          shutil.copyfileobj(upload.file, f)
+      with lock:
+        previous = previous_submission()
+        if previous is None:
+          jobs[job.id] = job
+          if request_id is not None:
+            submissions[request_id] = job
+          pending[job_params["device"]].put(job)
+          published = True
+      if previous is not None:
+        return previous.status(queue_position(previous))
+    finally:
+      if not published:
+        shutil.rmtree(job.directory, ignore_errors=True)
     logging.info("Job %s received: %s %s -> %s, %s, %d IO steps on %s%s", job.id[:8], job_params["model"],
                  job_params["moving_modality"], job_params["fixed_modality"], job_params["loss"],
                  job_params["io_steps"], job_params["device"], ", fixed mask" if job.fixed_mask_path else "")

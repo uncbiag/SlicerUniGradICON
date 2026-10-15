@@ -1,11 +1,11 @@
 """uniGradICON registration without Slicer, shared by the module and the registration server.
 
-Both run the same code, so a registration gives the same result whether it runs inside Slicer
-or on a server.
+Both use the same registration code and models, whether running inside Slicer or on a server.
 """
 
 import os
 import queue
+import tempfile
 import urllib.request
 
 INPUT_SHAPE = [1, 1, 175, 175, 175]
@@ -54,12 +54,20 @@ def ensure_weights(weights_dir, model_name, log=print):
   if not os.path.exists(path):
     os.makedirs(weights_dir, exist_ok=True)
     log(f"Downloading {model_name} weights from {url}")
-    urllib.request.urlretrieve(url, path + ".part")
-    os.replace(path + ".part", path)
+    # Each worker owns its download. Publish only a complete file, so another
+    # process can safely load the weights while concurrent downloads finish.
+    descriptor, partial_path = tempfile.mkstemp(prefix=file_name + ".", suffix=".part", dir=weights_dir)
+    os.close(descriptor)
+    try:
+      urllib.request.urlretrieve(url, partial_path)
+      os.replace(partial_path, path)
+    finally:
+      if os.path.exists(partial_path):
+        os.remove(partial_path)
   return path
 
 
-def load_model(weights_dir, model_name, loss, device):
+def load_model(weights_dir, model_name, loss, device, phase_callback=None):
   """The network of a model on a device, with the similarity loss set; loaded once per pair."""
   import torch
   import icon_registration as icon
@@ -69,8 +77,12 @@ def load_model(weights_dir, model_name, loss, device):
   key = (model_name, torch_device)
   model = _models.get(key)
   if model is None:
-    model = icon_helper.make_network(INPUT_SHAPE, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=torch_device)
+    if phase_callback and model_name not in available_models(weights_dir):
+      phase_callback("Downloading model weights")
     weights_path = ensure_weights(weights_dir, model_name)
+    if phase_callback:
+      phase_callback("Loading model")
+    model = icon_helper.make_network(INPUT_SHAPE, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=torch_device)
     model.regis_net.load_state_dict(torch.load(weights_path, map_location=torch_device, weights_only=True))
     model.to(torch_device)
     model.device = torch_device
@@ -101,33 +113,47 @@ def binary_mask_on(mask, reference):
 
 
 def register_images(model, fixed, moving, fixed_modality, moving_modality, io_steps=0, call_back=None, warp=True,
-                    fixed_mask=None):
+                    fixed_mask=None, phase_callback=None):
   """Register two itk images. Returns the moving-to-fixed transform and the warped moving image,
   which is None when ``warp`` is off. A ``fixed_mask`` limits the fixed image to the region of interest."""
-  import itk
   from UniGradICONHelpers import icon_helper
 
   if fixed_mask is not None:
     fixed_mask = binary_mask_on(fixed_mask, fixed)
+  if phase_callback:
+    phase_callback("Preparing images")
+  moving_input = icon_helper.preprocess(moving, moving_modality)
+  fixed_input = icon_helper.preprocess(fixed, fixed_modality, segmentation=fixed_mask)
+  if phase_callback:
+    phase_callback("Registering")
   phi_AB, _ = icon_helper.register_pair(
     model,
-    icon_helper.preprocess(moving, moving_modality),
-    icon_helper.preprocess(fixed, fixed_modality, segmentation=fixed_mask),
+    moving_input,
+    fixed_input,
     finetune_steps=None if io_steps == 0 else io_steps,
     call_back=call_back,
   )
   if not warp:
     return phi_AB, None
+  if phase_callback:
+    phase_callback("Resampling")
+  return phi_AB, resample_moving_image(moving, fixed, phi_AB)
+
+
+def resample_moving_image(moving, fixed, transform):
+  """ITK linear resampling of the original moving image onto the fixed grid."""
+  import itk
+
   moving = itk.CastImageFilter[type(moving), itk.Image[itk.F, 3]].New()(moving)
   interpolator = itk.LinearInterpolateImageFunction.New(moving)
   warped = itk.resample_image_filter(
     moving,
-    transform=phi_AB,
+    transform=transform,
     interpolator=interpolator,
     use_reference_image=True,
     reference_image=fixed,
   )
-  return phi_AB, warped
+  return warped
 
 
 def process_exists(pid):
@@ -180,8 +206,11 @@ def serve_registrations(requests, messages, cancel_flag, gpu=None):
         raise RegistrationCancelled()
       messages.put(("progress", {"total": total, "step": step, "elapsed": elapsed, "remaining": remaining}))
 
+    def phase_callback(phase):
+      messages.put(("phase", phase))
+
     try:
-      messages.put(("done", register_files(**arguments, call_back=call_back)))
+      messages.put(("done", register_files(**arguments, call_back=call_back, phase_callback=phase_callback)))
     except RegistrationCancelled:
       messages.put(("cancelled", None))
     except Exception as e:
@@ -189,20 +218,27 @@ def serve_registrations(requests, messages, cancel_flag, gpu=None):
 
 
 def register_files(fixed_path, moving_path, fixed_modality, moving_modality, model_name, loss, io_steps, device,
-                   weights_dir, out_dir, call_back=None, warp=True, fixed_mask_path=None):
-  """Register two image files; writes transform.tfm and, if ``warp``, warped.nrrd to out_dir.
+                   weights_dir, out_dir, call_back=None, warp=True, fixed_mask_path=None, phase_callback=None,
+                   transform_format="tfm"):
+  """Register two image files; writes a TFM or HDF5 transform and, if ``warp``, warped.nrrd.
 
   Returns their paths, None for the warped image when it was not made.
   """
   import itk
 
-  model = load_model(weights_dir, model_name, loss, device)
+  if transform_format not in ("tfm", "h5"):
+    raise ValueError("Transform format must be tfm or h5")
+  if phase_callback:
+    phase_callback("Loading model")
+  model = load_model(weights_dir, model_name, loss, device, phase_callback=phase_callback)
   fixed = itk.imread(fixed_path)
   moving = itk.imread(moving_path)
   fixed_mask = itk.imread(fixed_mask_path) if fixed_mask_path else None
   phi_AB, warped = register_images(model, fixed, moving, fixed_modality, moving_modality, io_steps, call_back, warp,
-                                   fixed_mask)
-  transform_path = os.path.join(out_dir, "transform.tfm")
+                                   fixed_mask, phase_callback=phase_callback)
+  if phase_callback:
+    phase_callback("Saving results")
+  transform_path = os.path.join(out_dir, "transform." + transform_format)
   itk.transformwrite([phi_AB], transform_path)
   if warped is None:
     return transform_path, None

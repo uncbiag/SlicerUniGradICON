@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <ui version="4.0">
  <class>UniGradICON</class>
  <widget class="qMRMLWidget" name="UniGradICON">
@@ -52,6 +52,9 @@
      </item>
     </layout>
    </item>
+   <property name="spacing">
+    <number>6</number>
+   </property>
    <item>
     <widget class="ctkCollapsibleButton" name="InputsCollapsibleButton">
      <property name="text">
@@ -61,14 +64,14 @@
       <bool>false</bool>
      </property>
      <layout class="QGridLayout" name="gridLayout_2">
-      <item row="0" column="0">
+      <item row="2" column="0">
        <widget class="QLabel" name="remoteProcessingLabel">
         <property name="text">
          <string>Remote processing:</string>
         </property>
        </widget>
       </item>
-      <item row="0" column="1" colspan="2">
+      <item row="2" column="1" colspan="2">
        <layout class="QHBoxLayout" name="remoteProcessingLayout">
         <item>
          <widget class="QCheckBox" name="remoteProcessingCheckBox">
@@ -76,7 +79,7 @@
            <string>Register on a UniGradICON registration server instead of in this Slicer.</string>
           </property>
           <property name="text">
-           <string/>
+           <string />
           </property>
          </widget>
         </item>
@@ -145,14 +148,14 @@
         </item>
        </layout>
       </item>
-      <item row="1" column="0">
+      <item row="3" column="0">
        <widget class="QLabel" name="remoteTokenLabel">
         <property name="text">
          <string>Server token:</string>
         </property>
        </widget>
       </item>
-      <item row="1" column="1" colspan="2">
+      <item row="3" column="1" colspan="2">
        <widget class="QLineEdit" name="remoteTokenLineEdit">
         <property name="toolTip">
          <string>Access token of the registration server, if it requires one.</string>
@@ -161,11 +164,11 @@
          <enum>QLineEdit::Password</enum>
         </property>
         <property name="placeholderText">
-         <string>if the server requires one</string>
+         <string>If the server requires one</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="0">
+      <item row="1" column="0">
        <widget class="QLabel" name="label_12">
         <property name="sizePolicy">
          <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
@@ -174,11 +177,11 @@
          </sizepolicy>
         </property>
         <property name="text">
-         <string>Moving Image: </string>
+         <string>Moving image: </string>
         </property>
        </widget>
       </item>
-      <item row="2" column="0">
+      <item row="0" column="0">
        <widget class="QLabel" name="label_11">
         <property name="sizePolicy">
          <sizepolicy hsizetype="Maximum" vsizetype="Preferred">
@@ -187,11 +190,11 @@
          </sizepolicy>
         </property>
         <property name="text">
-         <string>Fixed Image: </string>
+         <string>Fixed image: </string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1">
+      <item row="1" column="1">
        <widget class="qMRMLNodeComboBox" name="movingImageNodeComboBox">
         <property name="toolTip">
          <string>The image that is registered onto the fixed image.</string>
@@ -212,7 +215,7 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="2">
+      <item row="1" column="2">
        <widget class="QComboBox" name="movingModalityComboBox">
         <property name="enabled">
          <bool>true</bool>
@@ -235,7 +238,7 @@
         </item>
        </widget>
       </item>
-      <item row="2" column="1">
+      <item row="0" column="1">
        <widget class="qMRMLNodeComboBox" name="fixedImageNodeComboBox">
         <property name="toolTip">
          <string>The image the moving image is registered onto.</string>
@@ -259,7 +262,7 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="2">
+      <item row="0" column="2">
        <widget class="QComboBox" name="fixedModalityComboBox">
         <property name="enabled">
          <bool>true</bool>
@@ -287,9 +290,6 @@
    </item>
    <item>
     <widget class="ctkCollapsibleButton" name="generalSettingsCollapsibleButton">
-     <property name="text">
-      <string>Settings</string>
-     </property>
      <property name="collapsed">
       <bool>false</bool>
      </property>
@@ -320,7 +320,7 @@
       <item row="1" column="0">
        <widget class="QLabel" name="label_4">
         <property name="text">
-         <string>Similarity Loss: </string>
+         <string>Similarity loss: </string>
         </property>
        </widget>
       </item>
@@ -355,7 +355,7 @@
       <item row="2" column="0">
        <widget class="QLabel" name="label">
         <property name="text">
-         <string>IO Steps: </string>
+         <string>IO steps: </string>
         </property>
        </widget>
       </item>
@@ -387,97 +387,272 @@
       <item row="3" column="0">
        <widget class="QLabel" name="label_3">
         <property name="text">
-         <string>Device</string>
+         <string>Device:</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+     <property name="text">
+      <string>Registration settings</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="outputsCollapsibleButton">
+     <property name="text">
+      <string>Outputs</string>
+     </property>
+     <layout class="QFormLayout" name="formLayout_4">
+      <item row="2" column="0" colspan="2">
+       <widget class="QCheckBox" name="createVolumeCheckBox">
+        <property name="text">
+         <string>Create transformed volume</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>Clear to generate only the transform. With no output selected, a volume is created automatically.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0" colspan="2">
+       <widget class="QPushButton" name="newOutputsButton">
+        <property name="text">
+         <string>Create new outputs</string>
+        </property>
+        <property name="toolTip">
+         <string>Create outputs named from the moving and fixed images, preserving existing results.</string>
         </property>
        </widget>
       </item>
       <item row="4" column="0" colspan="2">
-       <widget class="ctkCollapsibleButton" name="outputsCollapsibleButton">
+       <widget class="QLabel" name="outputNoticeLabel">
         <property name="text">
-         <string>Outputs</string>
+         <string>Unselected outputs will be created automatically.</string>
         </property>
-        <property name="collapsed">
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_13">
+        <property name="text">
+         <string>Transform: </string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="outputTransformComboBox">
+        <property name="enabled">
          <bool>false</bool>
         </property>
-        <layout class="QFormLayout" name="formLayout_4">
+        <property name="toolTip">
+         <string>The transform that resamples the moving image onto the fixed image, a displacement field.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist>
+          <string>vtkMRMLTransformNode</string>
+         </stringlist>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_2">
+        <property name="text">
+         <string>Transformed volume:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="qMRMLNodeComboBox" name="outputVolumeComboBox">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string />
+        </property>
+        <property name="nodeTypes">
+         <stringlist>
+          <string>vtkMRMLScalarVolumeNode</string>
+         </stringlist>
+        </property>
+        <property name="showChildNodeTypes">
+         <bool>false</bool>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QFrame" name="registrationRunFrame">
+     <property name="frameShape">
+      <enum>QFrame::StyledPanel</enum>
+     </property>
+     <layout class="QVBoxLayout" name="registrationRunLayout">
+      <item>
+       <widget class="QPushButton" name="runRegistrationButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string />
+        </property>
+        <property name="text">
+         <string>Run registration</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="registrationStatusLabel">
+        <property name="text">
+         <string>Select the fixed and moving images to begin.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QProgressBar" name="progressBar">
+        <property name="value">
+         <number>0</number>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="time">
+        <property name="text">
+         <string />
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="comparisonCollapsibleButton">
+     <property name="text">
+      <string>Compare images</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <layout class="QVBoxLayout" name="comparisonPanelLayout">
+      <item>
+       <widget class="QFrame" name="comparisonControlsFrame">
+        <property name="frameShape">
+         <enum>QFrame::NoFrame</enum>
+        </property>
+        <layout class="QFormLayout" name="comparisonLayout">
+         <property name="leftMargin">
+          <number>0</number>
+         </property>
+         <property name="rightMargin">
+          <number>0</number>
+         </property>
          <item row="0" column="0">
-          <widget class="QLabel" name="label_13">
+          <widget class="QLabel" name="comparisonModeLabel">
            <property name="text">
-            <string>Transform: </string>
+            <string>Mode:</string>
            </property>
           </widget>
          </item>
          <item row="0" column="1">
-          <widget class="qMRMLNodeComboBox" name="outputTransformComboBox">
-           <property name="enabled">
-            <bool>false</bool>
-           </property>
+          <widget class="QComboBox" name="comparisonModeComboBox">
            <property name="toolTip">
-            <string>The transform that resamples the moving image onto the fixed image, a displacement field.</string>
+            <string>Compare the fixed image with the registered result or original moving image using an overlay or alternating checkerboard tiles.</string>
            </property>
-           <property name="nodeTypes">
-            <stringlist>
-             <string>vtkMRMLTransformNode</string>
-            </stringlist>
-           </property>
-           <property name="noneEnabled">
-            <bool>true</bool>
-           </property>
-           <property name="renameEnabled">
-            <bool>true</bool>
-           </property>
+           <item>
+            <property name="text">
+             <string>Overlay</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Checkerboard</string>
+            </property>
+           </item>
           </widget>
          </item>
          <item row="1" column="0">
-          <widget class="QLabel" name="label_2">
+          <widget class="QLabel" name="checkerboardTilesLabel">
            <property name="text">
-            <string>Transformed Volume:</string>
+            <string>Tiles per axis:</string>
            </property>
           </widget>
          </item>
          <item row="1" column="1">
-          <widget class="qMRMLNodeComboBox" name="outputVolumeComboBox">
-           <property name="enabled">
-            <bool>false</bool>
+          <widget class="QSpinBox" name="checkerboardTilesSpinBox">
+           <property name="minimum">
+            <number>2</number>
+           </property>
+           <property name="maximum">
+            <number>32</number>
+           </property>
+           <property name="value">
+            <number>8</number>
            </property>
            <property name="toolTip">
-            <string/>
-           </property>
-           <property name="nodeTypes">
-            <stringlist>
-             <string>vtkMRMLScalarVolumeNode</string>
-            </stringlist>
-           </property>
-           <property name="showChildNodeTypes">
-            <bool>false</bool>
-           </property>
-           <property name="noneEnabled">
-            <bool>true</bool>
-           </property>
-           <property name="addEnabled">
-            <bool>true</bool>
-           </property>
-           <property name="removeEnabled">
-            <bool>true</bool>
-           </property>
-           <property name="renameEnabled">
-            <bool>true</bool>
+            <string>Number of alternating tiles along each fixed-image axis. More tiles make smaller checks. Counts are limited by the image dimensions.</string>
            </property>
           </widget>
          </item>
         </layout>
        </widget>
       </item>
-      <item row="6" column="0" colspan="2">
-       <widget class="QPushButton" name="runRegistrationButton">
+      <item>
+       <widget class="QPushButton" name="compareResultButton">
+        <property name="text">
+         <string>Compare result</string>
+        </property>
+        <property name="checkable">
+         <bool>true</bool>
+        </property>
         <property name="enabled">
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string/>
+         <string>Toggle the fixed image overlay between the registered result and the original moving image.</string>
         </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="comparisonStatusLabel">
         <property name="text">
-         <string>Run Registration</string>
+         <string>Create a transformed volume to compare the result.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="textFormat">
+         <enum>Qt::PlainText</enum>
         </property>
        </widget>
       </item>
@@ -532,7 +707,7 @@
          <enum>QLineEdit::Password</enum>
         </property>
         <property name="placeholderText">
-         <string>recommended</string>
+         <string>Recommended</string>
         </property>
        </widget>
       </item>
@@ -562,7 +737,7 @@
       <item row="3" column="0">
        <widget class="QLabel" name="logConsoleLabel">
         <property name="text">
-         <string>Log to Console: </string>
+         <string>Log to console: </string>
         </property>
        </widget>
       </item>
@@ -572,7 +747,7 @@
          <string>Print the messages of the server in the Python console.</string>
         </property>
         <property name="text">
-         <string/>
+         <string />
         </property>
        </widget>
       </item>
@@ -589,7 +764,7 @@
          <string>Show the messages of the server in the log below.</string>
         </property>
         <property name="text">
-         <string/>
+         <string />
         </property>
         <property name="checked">
          <bool>true</bool>
@@ -633,7 +808,7 @@
            </sizepolicy>
           </property>
           <property name="text">
-           <string/>
+           <string />
           </property>
           <property name="textInteractionFlags">
            <set>Qt::LinksAccessibleByMouse|Qt::TextSelectableByKeyboard|Qt::TextSelectableByMouse</set>
@@ -656,36 +831,34 @@
     </widget>
    </item>
    <item>
-    <widget class="QLabel" name="time">
+    <widget class="ctkCollapsibleButton" name="detailsCollapsibleButton">
      <property name="text">
-      <string/>
+      <string>Log</string>
      </property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QProgressBar" name="progressBar">
-     <property name="value">
-      <number>0</number>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QTextEdit" name="statusLog">
-     <property name="readOnly">
+     <property name="collapsed">
       <bool>true</bool>
      </property>
+     <layout class="QVBoxLayout" name="detailsLayout">
+      <item>
+       <widget class="QTextEdit" name="statusLog">
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+        <property name="minimumHeight">
+         <number>100</number>
+        </property>
+        <property name="maximumHeight">
+         <number>180</number>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
    <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
-     </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>20</width>
-       <height>80</height>
-      </size>
      </property>
     </spacer>
    </item>
@@ -711,7 +884,7 @@
    <container>1</container>
   </customwidget>
  </customwidgets>
- <resources/>
+ <resources />
  <connections>
   <connection>
    <sender>UniGradICON</sender>

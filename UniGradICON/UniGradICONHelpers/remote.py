@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import time
+import uuid
+from contextlib import ExitStack
 
 import requests
 
@@ -52,13 +54,15 @@ class RegistrationServerClient:
     """
     headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
     for attempt in range(len(retryDelays) + 1):
-      opened = {}
       try:
-        if filePaths:
-          opened = {field: open(path, "rb") for field, path in filePaths.items()}
-          kwargs["files"] = {field: (os.path.basename(filePaths[field]), f) for field, f in opened.items()}
-        response = requests.request(method, self.url + path, headers=headers,
-                                    timeout=(connectTimeout, timeout), **kwargs)
+        with ExitStack() as files:
+          if filePaths:
+            kwargs["files"] = {
+              field: (os.path.basename(filePath), files.enter_context(open(filePath, "rb")))
+              for field, filePath in filePaths.items()
+            }
+          response = requests.request(method, self.url + path, headers=headers,
+                                      timeout=(connectTimeout, timeout), **kwargs)
         break
       except (requests.ConnectionError, requests.Timeout) as e:
         description = self._describe(e)
@@ -67,9 +71,6 @@ class RegistrationServerClient:
         delay = retryDelays[attempt]
         logging.warning(f"{description} Retrying in {delay} s ({attempt + 1} of {len(retryDelays)}).")
         time.sleep(delay)
-      finally:
-        for f in opened.values():
-          f.close()
     if response.status_code == 401:
       raise ServerError("The registration server refused the access token.")
     if not response.ok:
@@ -91,10 +92,10 @@ class RegistrationServerClient:
     paths = {"fixed": fixed_path, "moving": moving_path}
     if fixed_mask_path:
       paths["fixed_mask"] = fixed_mask_path
-    # NB: if the server got a failed attempt after all, its job just stays unused and expires
+    # Reuse the submission UUID on every retry, including when only the response was lost.
     return self._request("POST", "/jobs", timeout=UPLOAD_TIMEOUT, connectTimeout=TRANSFER_CONNECT_TIMEOUT,
                          retryDelays=TRANSFER_RETRY_DELAYS, filePaths=paths,
-                         data={"params": json.dumps(params)}).json()
+                         data={"params": json.dumps(params), "request_id": uuid.uuid4().hex}).json()
 
   def status(self, job_id):
     return self._request("GET", f"/jobs/{job_id}").json()
