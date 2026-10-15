@@ -236,7 +236,11 @@ class ServerControls:
 
   def scheduleReconnect(self):
     """Check the server again once the GUI is updated (see reconnectToServerQuietly)."""
-    self._reconnectTimer.start(0)
+    if hasattr(self, "_backendDebounce"):
+      if self.ui.remoteProcessingCheckBox.checked:
+        self._backendDebounce.start(0)
+    else:
+      self._reconnectTimer.start(0)
 
   def reconnectToServerQuietly(self):
     """Connect to the server of the shown parameter node again, without dialogs.
@@ -262,6 +266,9 @@ class ServerControls:
       self.updateProcessingGUI()
 
   def onRemoteServerButtonToggled(self, checked):
+    if checked and hasattr(self, "_backendDebounce"):
+      self.checkBackend()
+      return
     from UniGradICONHelpers import remote
     if checked:
       try:

@@ -79,6 +79,120 @@ def test_remote_task_downloads_requested_results_before_deleting_job(tmp_path, m
     job.cleanup()
 
 
+def test_remote_masks_labels_and_overlapping_segment_propagation(tmp_path, monkeypatch):
+  import SimpleITK as sitk
+  import numpy as np
+  submissions = []
+  class Client:
+    def __init__(self, *args):
+      pass
+    def info(self):
+      return {"devices": ["CPU"], "features": ["segmentationGuidance"]}
+    def submit(self, fixed, moving, settings, **uploads):
+      submissions.append((settings, uploads))
+      assert set(uploads) == {"fixed_mask_path", "fixed_segmentation_path", "moving_segmentation_path"}
+      for path in uploads.values():
+        assert sitk.ReadImage(path).GetSize() == (3, 3, 3)
+      return {"id": "guided"}
+    def status(self, job_id):
+      return {"state": "done"}
+    def download(self, job_id, kind, path):
+      assert kind == "transform"
+      sitk.WriteTransform(sitk.TranslationTransform(3, [1, 0, 0]), path)
+      return path
+    def cancel(self, job_id):
+      pass
+  monkeypatch.setattr(task, "RegistrationServerClient", Client)
+  job = make_task(tmp_path, warp=False)
+  labels = np.zeros((3, 3, 3), np.uint8)
+  labels[:, :, 1] = 1
+  for key in ("fixed_mask", "fixed_segmentation", "moving_segmentation", "propagation_0", "propagation_1"):
+    job.images[key] = sitk.GetImageFromArray(labels)
+  job.settings.update(dice_loss_weight=0.1, io_steps=1)
+  try:
+    job.start()
+    result = terminal_event(job)[-1]
+    assert result[0] == "result", result
+    assert len(result[1][2]) == 2
+    expected = np.zeros_like(labels)
+    expected[:, :, 0] = 1
+    for image in result[1][2]:
+      np.testing.assert_array_equal(sitk.GetArrayFromImage(image), expected)
+    assert submissions[0][0]["dice_loss_weight"] == 0.1
+  finally:
+    job.cleanup()
+
+
+def test_guidance_is_not_silently_ignored_by_older_server(tmp_path, monkeypatch):
+  class Client:
+    def __init__(self, *args):
+      pass
+    def info(self):
+      return {"devices": ["CPU"]}
+    def submit(self, *args, **kwargs):
+      raise AssertionError("Must not submit Dice guidance to an older server")
+  monkeypatch.setattr(task, "RegistrationServerClient", Client)
+  job = make_task(tmp_path)
+  job.settings["dice_loss_weight"] = 0.1
+  job.start()
+  error = terminal_event(job)[-1]
+  assert error[0] == "error" and "does not support segmentation-guided IO" in error[1]
+  assert not Path(job.directory).exists()
+
+
+@pytest.mark.parametrize("mode", ["input", "loss"])
+def test_remote_masking_mode_uploads_both_masks(tmp_path, monkeypatch, mode):
+  import SimpleITK as sitk
+  seen = []
+  class Client:
+    def __init__(self, *args):
+      pass
+    def info(self):
+      return {"devices": ["CPU"], "features": ["inputMasking", "lossFunctionMasking"]}
+    def submit(self, fixed, moving, settings, **uploads):
+      assert settings["input_masking"] == (mode == "input")
+      assert settings["loss_function_masking"] == (mode == "loss")
+      assert set(uploads) == {"fixed_mask_path", "moving_mask_path"}
+      assert all(sitk.ReadImage(path).GetSize() == (3, 3, 3) for path in uploads.values())
+      seen.append(settings)
+      return {"id": "masked"}
+    def status(self, job_id):
+      return {"state": "done"}
+    def download(self, job_id, kind, path):
+      sitk.WriteTransform(sitk.Transform(3, sitk.sitkIdentity), path)
+      return path
+    def cancel(self, job_id):
+      pass
+  monkeypatch.setattr(task, "RegistrationServerClient", Client)
+  job = make_task(tmp_path, warp=False)
+  job.images.update(fixed_mask=sitk.Image([3, 3, 3], sitk.sitkUInt8) + 1,
+                    moving_mask=sitk.Image([3, 3, 3], sitk.sitkUInt8) + 1)
+  job.settings.update(input_masking=mode == "input", loss_function_masking=mode == "loss", io_steps=1)
+  try:
+    job.start()
+    result = terminal_event(job)[-1]
+    assert result[0] == "result", result
+    assert len(seen) == 1
+  finally:
+    job.cleanup()
+
+
+@pytest.mark.parametrize("mode", ["input", "loss"])
+def test_remote_masking_rejects_server_that_cannot_honor_mode(tmp_path, monkeypatch, mode):
+  class Client:
+    def __init__(self, *args):
+      pass
+    def info(self):
+      return {"devices": ["CPU"]}
+  monkeypatch.setattr(task, "RegistrationServerClient", Client)
+  job = make_task(tmp_path)
+  job.settings.update(input_masking=mode == "input", loss_function_masking=mode == "loss", io_steps=1)
+  job.start()
+  result = terminal_event(job)[-1]
+  assert result[0] == "error" and "does not support" in result[1]
+  assert not Path(job.directory).exists()
+
+
 def test_cancelling_during_upload_cancels_accepted_job_and_preserves_outputs(tmp_path, monkeypatch):
   entered = threading.Event()
   release = threading.Event()
@@ -192,3 +306,19 @@ def test_local_stop_escalates_if_worker_ignores_terminate(monkeypatch):
   monkeypatch.setattr(task.os, "killpg", lambda pid, signum: signals.append(signum))
   task.RegistrationTask._stop_process(Process())
   assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_multilabel_does_not_submit_to_server_that_would_binarize_labels(tmp_path, monkeypatch):
+  class Client:
+    def __init__(self, *args):
+      pass
+    def info(self):
+      return {"devices": ["CPU"], "features": ["segmentationGuidance"]}
+    def submit(self, *args, **kwargs):
+      raise AssertionError("Do not upload multi-label inputs to an older server")
+  monkeypatch.setattr(task, "RegistrationServerClient", Client)
+  job = make_task(tmp_path)
+  job.settings.update(dice_loss_weight=10, multilabel_segmentation=True, io_steps=1)
+  job.start()
+  result = terminal_event(job)[-1]
+  assert result[0] == "error" and "preserve multiple segmentation labels" in result[1]

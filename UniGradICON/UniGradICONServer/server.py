@@ -35,6 +35,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import FileResponse
 
 from UniGradICONHelpers import registration
+from UniGradICONHelpers.segmentation import guidance_available, loss_masking_available, validate_weight, validate_masking
 
 API_VERSION = 1
 DEFAULT_PORT = 8899
@@ -66,6 +67,9 @@ class Job:
     self.transform_path = None
     self.warped_path = None
     self.fixed_mask_path = None
+    self.moving_mask_path = None
+    self.fixed_segmentation_path = None
+    self.moving_segmentation_path = None
     self.request_id = None
 
   def status(self, position=None):
@@ -178,6 +182,22 @@ def validate_params(params, devices):
   warp = params.get("warp", True)  # older clients always want the warped image
   if not isinstance(warp, bool):
     raise HTTPException(400, "'warp' must be true or false")
+  dice_weight = params.get("dice_loss_weight", 0)
+  try:
+    validate_weight(dice_weight)
+  except ValueError as error:
+    raise HTTPException(400, str(error))
+  if dice_weight and io_steps == 0:
+    raise HTTPException(400, "Segmentation guidance requires at least one IO step")
+  multilabel = params.get("multilabel_segmentation", False)
+  if not isinstance(multilabel, bool) or (multilabel and not dice_weight):
+    raise HTTPException(400, "multilabel_segmentation requires Dice guidance and must be true or false")
+  input_masking = params.get("input_masking")
+  loss_masking = params.get("loss_function_masking", False)
+  try:
+    validate_masking(input_masking, loss_masking, io_steps)
+  except ValueError as error:
+    raise HTTPException(400, str(error))
   return {
     "fixed_modality": choice("fixed_modality", MODALITIES),
     "moving_modality": choice("moving_modality", MODALITIES),
@@ -186,6 +206,10 @@ def validate_params(params, devices):
     "io_steps": io_steps,
     "device": choice("device", devices),
     "warp": warp,
+    "dice_loss_weight": dice_weight,
+    "input_masking": input_masking,
+    "multilabel_segmentation": multilabel,
+    "loss_function_masking": loss_masking,
   }
 
 
@@ -278,6 +302,13 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
       "warp": params["warp"],
       "fixed_mask_path": job.fixed_mask_path,
     }
+    if params["input_masking"] is not None or params["loss_function_masking"] or job.moving_mask_path:
+      arguments.update(input_masking=params["input_masking"], loss_function_masking=params["loss_function_masking"],
+                       moving_mask_path=job.moving_mask_path)
+    if params.get("dice_loss_weight"):
+      arguments.update(dice_loss_weight=params["dice_loss_weight"],
+                       fixed_segmentation_path=job.fixed_segmentation_path,
+                       moving_segmentation_path=job.moving_segmentation_path)
     try:
       job.transform_path, job.warped_path = runner.run(job, arguments)
       job.state = CANCELLED if job.cancel.is_set() else DONE
@@ -342,17 +373,34 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
       "losses": list(LOSSES),
       "gpus": gpu_total,
       "jobsPerGpu": jobs_per_gpu,
+      "features": ["fixedMask", "inputMasking"]
+        + (["segmentationGuidance", "multiLabelSegmentation"] if guidance_available() else [])
+        + (["lossFunctionMasking"] if loss_masking_available() else []),
     }
 
   @app.post("/jobs", dependencies=[Depends(check_token)])
   def submit(fixed: UploadFile = File(...), moving: UploadFile = File(...), params: str = Form(...),
-             fixed_mask: UploadFile = File(None), request_id: str = Form(None)):
+             fixed_mask: UploadFile = File(None), request_id: str = Form(None),
+             fixed_segmentation: UploadFile = File(None), moving_segmentation: UploadFile = File(None),
+             moving_mask: UploadFile = File(None)):
     remove_expired_jobs()
     try:
       raw_params = json.loads(params)
     except json.JSONDecodeError:
       raise HTTPException(400, "'params' must be JSON")
     job_params = validate_params(raw_params, server_devices())
+    if job_params["input_masking"] or job_params["loss_function_masking"]:
+      if fixed_mask is None or moving_mask is None:
+        raise HTTPException(400, "Masking requires both fixed and moving masks")
+    if job_params["loss_function_masking"] and not loss_masking_available():
+      raise HTTPException(400, "The server needs a uniGradICON build with loss-function masking support")
+    if job_params["dice_loss_weight"]:
+      if fixed_segmentation is None or moving_segmentation is None:
+        raise HTTPException(400, "Dice guidance requires both fixed and moving segmentations")
+      if not guidance_available():
+        raise HTTPException(400, "The server needs a uniGradICON build with Dice-loss support")
+    elif fixed_segmentation is not None or moving_segmentation is not None:
+      raise HTTPException(400, "Segmentation labels require a positive dice_loss_weight")
     if request_id is not None:
       try:
         request_id = uuid.UUID(request_id).hex
@@ -374,14 +422,18 @@ def create_app(weights_dir=DEFAULT_WEIGHTS_DIR, token=None, register=None, devic
     # Validate every name before allocating storage; all failed copies are cleaned up below.
     uploads = [(fixed, "fixed" + image_suffix(fixed.filename)),
                (moving, "moving" + image_suffix(moving.filename))]
-    if fixed_mask is not None:
-      uploads.append((fixed_mask, "fixed_mask" + image_suffix(fixed_mask.filename)))
+    extra_uploads = {"fixed_mask": fixed_mask, "moving_mask": moving_mask, "fixed_segmentation": fixed_segmentation,
+                     "moving_segmentation": moving_segmentation}
+    for role, upload in extra_uploads.items():
+      if upload is not None:
+        uploads.append((upload, role + image_suffix(upload.filename)))
     job = Job(job_params, tempfile.mkdtemp(dir=work_root), next(order))
     job.request_id = request_id
     job.fixed_path = os.path.join(job.directory, uploads[0][1])
     job.moving_path = os.path.join(job.directory, uploads[1][1])
-    if fixed_mask is not None:
-      job.fixed_mask_path = os.path.join(job.directory, uploads[2][1])
+    for role, upload in extra_uploads.items():
+      if upload is not None:
+        setattr(job, role + "_path", os.path.join(job.directory, role + image_suffix(upload.filename)))
     published = False
     try:
       for upload, name in uploads:

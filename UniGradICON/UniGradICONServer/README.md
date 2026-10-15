@@ -14,6 +14,33 @@ in the background, and status shows uploads, queue position, registration and do
 request during a transfer is sent once that transfer finishes; an active server job stops at its
 next cancellation checkpoint. Cancelling a registration does not stop the registration server.
 
+## Segmentations
+
+The server accepts fixed and moving masks separately from Dice labels.
+**Input masking** (`input_masking=true`) zeros intensities outside each mask before
+registration and works without IO or Dice guidance. **Loss-function masking**
+(`loss_function_masking=true`, `input_masking=false`) preserves image inputs and
+restricts the similarity loss to the masks during IO. Both modes require
+`fixed_mask` and `moving_mask` uploads; loss-function masking also requires positive
+IO steps. Legacy fixed-mask-only requests retain their earlier behavior.
+
+The server requirements install **uniGradICON 1.0.6** and
+`icon_registration>=1.1.9`, including Dice guidance and masked similarity losses.
+To update an existing server environment, run `pip install "unigradicon==1.0.6"`
+and restart the server. No branch checkout is needed.
+
+`/info` advertises `inputMasking` and adds `lossFunctionMasking` and
+`segmentationGuidance` and `multiLabelSegmentation` when their installed APIs are available. Dice-guided jobs
+require a positive `dice_loss_weight`, positive `io_steps`,
+and both `fixed_segmentation` and `moving_segmentation` uploads. These are multi-label
+images in physical coordinates, with matching nonzero integer label values. Label
+values are preserved through nearest-neighbor regridding; all shared foreground
+classes contribute to Dice. Clients set `multilabel_segmentation=true` and require
+the advertised `multiLabelSegmentation` feature. Older servers or backends are
+rejected before uploading instead of silently merging labels.
+Segmentation propagation runs on the Slicer client using the returned transform
+and nearest-neighbor interpolation; propagation inputs are not uploaded.
+
 ## Start it from Slicer
 
 On a computer where UniGradICON runs locally, open **Local registration server**, choose the port,

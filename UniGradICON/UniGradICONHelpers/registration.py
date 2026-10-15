@@ -25,7 +25,7 @@ MODEL_WEIGHTS = {
 DEVICE_CPU = "CPU"
 DEVICE_GPU = "GPU"
 
-_models = {}  # (model name, device) -> network, loaded once
+_models = {}  # (model, device[, "upstream", loss masking]) -> network; upstream and image-only models stay separate
 
 
 class RegistrationCancelled(Exception):
@@ -67,27 +67,43 @@ def ensure_weights(weights_dir, model_name, log=print):
   return path
 
 
-def load_model(weights_dir, model_name, loss, device, phase_callback=None):
+def load_model(weights_dir, model_name, loss, device, phase_callback=None, dice_loss_weight=0, loss_function_masking=False):
   """The network of a model on a device, with the similarity loss set; loaded once per pair."""
   import torch
   import icon_registration as icon
   from UniGradICONHelpers import icon_helper
+  from .segmentation import validate_weight, validate_masking
+  validate_weight(dice_loss_weight)
+  validate_masking(loss_function_masking=loss_function_masking)
 
   torch_device = "cuda" if device == DEVICE_GPU else "cpu"
-  key = (model_name, torch_device)
+  using_upstream = bool(dice_loss_weight or loss_function_masking)
+  key = (model_name, torch_device, "upstream", bool(loss_function_masking)) if using_upstream else (model_name, torch_device)
   model = _models.get(key)
   if model is None:
+    if using_upstream:
+      from .segmentation import guidance_backend, masking_backend
+      guided_backend = masking_backend() if loss_function_masking else guidance_backend()
     if phase_callback and model_name not in available_models(weights_dir):
       phase_callback("Downloading model weights")
     weights_path = ensure_weights(weights_dir, model_name)
     if phase_callback:
       phase_callback("Loading model")
-    model = icon_helper.make_network(INPUT_SHAPE, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=torch_device)
+    if using_upstream:
+      options = {"dice_loss_weight": dice_loss_weight}
+      if loss_function_masking:
+        options["loss_function_masking"] = True
+      model = guided_backend.make_network(INPUT_SHAPE, include_last_step=True, loss_fn=icon.LNCC(sigma=5), **options)
+    else:
+      model = icon_helper.make_network(INPUT_SHAPE, include_last_step=True, loss_fn=icon.LNCC(sigma=5), device=torch_device)
     model.regis_net.load_state_dict(torch.load(weights_path, map_location=torch_device, weights_only=True))
     model.to(torch_device)
     model.device = torch_device
     _models[key] = model
   model.similarity = icon_helper.make_sim(loss)
+  if using_upstream:
+    model.dice_loss_weight = dice_loss_weight
+    model.loss_function_masking = bool(loss_function_masking)
   model.eval()
   return model
 
@@ -112,26 +128,55 @@ def binary_mask_on(mask, reference):
   return binary
 
 
-def register_images(model, fixed, moving, fixed_modality, moving_modality, io_steps=0, call_back=None, warp=True,
-                    fixed_mask=None, phase_callback=None):
-  """Register two itk images. Returns the moving-to-fixed transform and the warped moving image,
-  which is None when ``warp`` is off. A ``fixed_mask`` limits the fixed image to the region of interest."""
-  from UniGradICONHelpers import icon_helper
+def labels_on(labels, reference):
+  import itk
+  import numpy as np
+  from .segmentation import label_values
+  image = itk.image_from_array(label_values(itk.array_from_image(labels)).astype(np.float64))
+  image.CopyInformation(labels)
+  return itk.resample_image_filter(image, interpolator=itk.NearestNeighborInterpolateImageFunction.New(image),
+                                   use_reference_image=True, reference_image=reference)
 
+
+def register_images(model, fixed, moving, fixed_modality, moving_modality, io_steps=0, call_back=None, warp=True,
+                    fixed_mask=None, phase_callback=None, fixed_segmentation=None, moving_segmentation=None,
+                    moving_mask=None, input_masking=None, loss_function_masking=False):
+  """Register two itk images. Returns the moving-to-fixed transform and the warped moving image,
+  which is None when ``warp`` is off. Masks can restrict image intensities or the similarity loss."""
+  from UniGradICONHelpers import icon_helper
+  from .segmentation import validate_masking
+  validate_masking(input_masking, loss_function_masking, io_steps)
+
+  if loss_function_masking and (fixed_mask is None or moving_mask is None):
+    raise ValueError("Loss-function masking requires both masks and at least one IO step.")
+  if input_masking is True and (fixed_mask is None or moving_mask is None):
+    raise ValueError("Input masking requires both fixed and moving masks.")
+  apply_inputs = not loss_function_masking if input_masking is None else input_masking
   if fixed_mask is not None:
     fixed_mask = binary_mask_on(fixed_mask, fixed)
+  if moving_mask is not None:
+    moving_mask = binary_mask_on(moving_mask, moving)
   if phase_callback:
     phase_callback("Preparing images")
-  moving_input = icon_helper.preprocess(moving, moving_modality)
-  fixed_input = icon_helper.preprocess(fixed, fixed_modality, segmentation=fixed_mask)
+  moving_input = icon_helper.preprocess(moving, moving_modality, segmentation=moving_mask if apply_inputs else None)
+  fixed_input = icon_helper.preprocess(fixed, fixed_modality, segmentation=fixed_mask if apply_inputs else None)
   if phase_callback:
     phase_callback("Registering")
+  guidance = {}
+  if loss_function_masking:
+    guidance.update(mask_A=moving_mask, mask_B=fixed_mask)
+  if fixed_segmentation is not None or moving_segmentation is not None:
+    if fixed_segmentation is None or moving_segmentation is None or io_steps <= 0:
+      raise ValueError("Dice guidance requires both segmentations and at least one IO step.")
+    guidance.update(segmentation_A=labels_on(moving_segmentation, moving),
+                    segmentation_B=labels_on(fixed_segmentation, fixed))
   phi_AB, _ = icon_helper.register_pair(
     model,
     moving_input,
     fixed_input,
     finetune_steps=None if io_steps == 0 else io_steps,
     call_back=call_back,
+    **guidance,
   )
   if not warp:
     return phi_AB, None
@@ -219,23 +264,44 @@ def serve_registrations(requests, messages, cancel_flag, gpu=None):
 
 def register_files(fixed_path, moving_path, fixed_modality, moving_modality, model_name, loss, io_steps, device,
                    weights_dir, out_dir, call_back=None, warp=True, fixed_mask_path=None, phase_callback=None,
-                   transform_format="tfm"):
+                   transform_format="tfm", fixed_segmentation_path=None, moving_segmentation_path=None,
+                   dice_loss_weight=0, moving_mask_path=None, input_masking=None, loss_function_masking=False):
   """Register two image files; writes a TFM or HDF5 transform and, if ``warp``, warped.nrrd.
 
   Returns their paths, None for the warped image when it was not made.
   """
   import itk
 
+  from .segmentation import validate_weight
+  validate_weight(dice_loss_weight)
   if transform_format not in ("tfm", "h5"):
     raise ValueError("Transform format must be tfm or h5")
   if phase_callback:
     phase_callback("Loading model")
-  model = load_model(weights_dir, model_name, loss, device, phase_callback=phase_callback)
+  if dice_loss_weight and (io_steps <= 0 or not fixed_segmentation_path or not moving_segmentation_path):
+    raise ValueError("Dice guidance requires both segmentations and at least one IO step.")
+  if not dice_loss_weight and (fixed_segmentation_path or moving_segmentation_path):
+    raise ValueError("Segmentation labels require a positive Dice loss weight.")
+  from .segmentation import validate_masking
+  validate_masking(input_masking, loss_function_masking, io_steps)
+  if (input_masking or loss_function_masking) and (not fixed_mask_path or not moving_mask_path):
+    raise ValueError("Masking requires both fixed and moving masks.")
+  model_options = {"dice_loss_weight": dice_loss_weight} if dice_loss_weight else {}
+  if loss_function_masking:
+    model_options["loss_function_masking"] = True
+  model = load_model(weights_dir, model_name, loss, device, phase_callback=phase_callback, **model_options)
   fixed = itk.imread(fixed_path)
   moving = itk.imread(moving_path)
   fixed_mask = itk.imread(fixed_mask_path) if fixed_mask_path else None
+  guidance = {}
+  if moving_mask_path or input_masking is not None or loss_function_masking:
+    guidance.update(moving_mask=itk.imread(moving_mask_path) if moving_mask_path else None,
+                    input_masking=input_masking, loss_function_masking=loss_function_masking)
+  if dice_loss_weight:
+    guidance.update(fixed_segmentation=itk.imread(fixed_segmentation_path),
+                    moving_segmentation=itk.imread(moving_segmentation_path))
   phi_AB, warped = register_images(model, fixed, moving, fixed_modality, moving_modality, io_steps, call_back, warp,
-                                   fixed_mask, phase_callback=phase_callback)
+                                   fixed_mask, phase_callback=phase_callback, **guidance)
   if phase_callback:
     phase_callback("Saving results")
   transform_path = os.path.join(out_dir, "transform." + transform_format)

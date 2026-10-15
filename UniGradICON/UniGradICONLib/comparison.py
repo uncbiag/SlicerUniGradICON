@@ -1,5 +1,6 @@
 """Overlay and asynchronous checkerboard comparisons, including scene-save cleanup."""
 import slicer
+import qt
 
 from .logic import UniGradICONLogic
 
@@ -16,6 +17,7 @@ class ComparisonControls:
 
   def onSceneStartSave(self, caller, event):
     """Save real image references rather than references to an unsaved preview."""
+    self.restoreComparisonSegmentations()
     self._comparisonSaveRestore = []
     preview = self._checkerboardNode
     result = self._completedResult
@@ -48,6 +50,32 @@ class ComparisonControls:
         composite.SetForegroundVolumeID(foreground)
         composite.SetForegroundOpacity(opacity)
         composite.EndModify(modified)
+    self.updateComparisonSegmentations()
+
+  def restoreComparisonSegmentations(self):
+    for node, property_name, value in self._comparisonSegmentationVisibility:
+      if node.GetScene() == slicer.mrmlScene and not getattr(node, "Get" + property_name)():
+        getattr(node, "Set" + property_name)(value)
+    self._comparisonSegmentationVisibility = []
+
+  def updateComparisonSegmentations(self, checked=None):
+    hidden = (self.parent.isEntered and self._comparisonViewActive and self.ui.comparisonModeComboBox.currentText == "Checkerboard"
+              and not self.ui.comparisonSegmentationsCheckBox.checked)
+    if not hidden:
+      self.restoreComparisonSegmentations()
+      return
+    saved = {node for node, _, _ in self._comparisonSegmentationVisibility}
+    for node_class, property_name in (("vtkMRMLSegmentationDisplayNode", "Visibility2D"),
+                                       ("vtkMRMLSliceCompositeNode", "LabelOpacity")):
+      for node in slicer.util.getNodesByClass(node_class):
+        if node not in saved:
+          self._comparisonSegmentationVisibility.append((node, property_name, getattr(node, "Get" + property_name)()))
+        getattr(node, "Set" + property_name)(0)
+
+  def onComparisonNodeAdded(self, caller, event):
+    if self._comparisonSegmentationVisibility:
+      # Default display nodes may still be initialized during NodeAddedEvent.
+      qt.QTimer.singleShot(0, lambda: self._comparisonSegmentationVisibility and self.updateComparisonSegmentations())
 
   def onCompareResult(self, checked):
     result = self._completedResult
@@ -89,6 +117,7 @@ class ComparisonControls:
 
   def clearCheckerboard(self, restore=True):
     """Invalidate pending filters; keep their nodes until asynchronous cancellation finishes."""
+    self.restoreComparisonSegmentations()
     self._checkerboardGeneration += 1
     self._checkerboardRefreshTimer.stop()
     self._pendingCheckerboard = None
@@ -243,6 +272,7 @@ class ComparisonControls:
       if not self._comparisonViewActive:
         slicer.util.resetSliceViews()
       self._comparisonViewActive = True
+      self.updateComparisonSegmentations()
       if previous is not None and previous.GetScene() == slicer.mrmlScene:
         self._removeCheckerboardPreview(previous)
       self.setComparisonStatus("Checkerboard: registered result" if self.ui.compareResultButton.checked

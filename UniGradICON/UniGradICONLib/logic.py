@@ -10,6 +10,10 @@ import slicer
 import vtk
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 
+from UniGradICONHelpers.segmentation import (
+  DEFAULT_DICE_WEIGHT, UNIGRADICON_VERSION, UNIGRADICON_REQUIREMENT, backend_packages_current,
+)
+
 from .settings import (
   PresetManager, REMOTE_PROCESSING_SETTING, SERVER_URL_SETTING,
   SERVER_TOKENS_SETTING_GROUP, WEIGHTS_DIRECTORY,
@@ -64,6 +68,10 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
   REMOTE_PROCESSING_PARAM = "RemoteProcessing"
   SERVER_URL_PARAM = "ServerUrl"
   CREATE_VOLUME_PARAM = "CreateTransformedVolume"
+  SEGMENTATION_REFS = {"fixed": "FixedSegmentation", "moving": "MovingSegmentation"}
+  MASK_REFS = {"fixedMask": "FixedMaskSegmentation", "movingMask": "MovingMaskSegmentation"}
+  PROPAGATION_REF = "PropagationSegmentation"
+  OUTPUT_SEGMENTATION_REF = "OutputSegmentation"
 
   def __init__(self, weights_location=None):
     ScriptedLoadableModuleLogic.__init__(self)
@@ -73,10 +81,13 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     self.modelName = "unigradicon"
     self.loss = "LNCC"
     self._localBackendReady = False
+    self._backendRestartRequired = False
     self.cancelRequested = False
 
   def ensureLocalBackend(self):
     """Install/check local dependencies. The shared backend downloads the selected model on demand."""
+    if self._backendRestartRequired:
+      raise RuntimeError("The registration backend was updated. Restart Slicer to load the new packages.")
     if self._localBackendReady:
       return
 
@@ -97,18 +108,26 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
         raise RuntimeError(f"PyTorch {torchLogic.torch.__version__} is too old. "
                            f"Install PyTorch >= {minimumTorchVersion} using PyTorch Util.")
     _checkPyTorchNumPyCompatibility()
+    if not backend_packages_current():
+      if not slicer.util.confirmOkCancelDisplay(
+          f"The local backend requires uniGradICON {UNIGRADICON_VERSION}. Click OK to install or update it."):
+        raise RuntimeError(f"Install {UNIGRADICON_REQUIREMENT} to use local registration.")
+      import sys
+      restart_needed = any(name in sys.modules for name in ("unigradicon", "icon_registration"))
+      slicer.util.pip_install(UNIGRADICON_REQUIREMENT)
+      from importlib import invalidate_caches
+      invalidate_caches()
+      self._backendRestartRequired = restart_needed
+      if restart_needed:
+        raise RuntimeError("The registration backend was updated. Restart Slicer to load the new packages.")
     try:
-      import icon_registration
-    except ModuleNotFoundError:
-      if slicer.util.confirmOkCancelDisplay("'icon_registration' is missing. Click OK to install it."):
-        slicer.util.pip_install("icon_registration")
-    try:
-      # the registration code imports these where it uses them; here they only check the installation
+      import unigradicon  # noqa: F401
       import icon_registration  # noqa: F401
       import itk  # noqa: F401
       import UniGradICONHelpers.icon_helper  # noqa: F401
-    except ModuleNotFoundError:
-      raise RuntimeError("The local backend is incomplete. Reinstall icon_registration and its ITK dependency.")
+    except (ImportError, AttributeError) as error:
+      raise RuntimeError(f"The local backend is incomplete. Reinstall {UNIGRADICON_REQUIREMENT} "
+                         "and restart Slicer.") from error
     self._localBackendReady = True
 
   def setDefaultParameters(self, parameterNode):
@@ -117,6 +136,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     newSet = not parameterNode.GetParameter(self.SETTINGS_JSON_PARAM)
     if newSet:
       parameterNode.SetParameter(self.SETTINGS_JSON_PARAM, json.dumps(presetParameters))
+    if not parameterNode.GetParameter("MaskingMode"):
+      parameterNode.SetParameter("MaskingMode", "input" if parameterNode.GetParameter("UseFixedSegmentMask") == "true" else "none")
     # Older scenes store input IDs only in JSON. Promote them to MRML references
     # so future scene imports can remap them along with the output references.
     imageSettings = json.loads(parameterNode.GetParameter(self.SETTINGS_JSON_PARAM))["image"]
@@ -177,6 +198,8 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     For callers without the module's GUI, such as other modules. Writes the transform
     that resamples the moving volume onto the fixed one into outputTransformNode, and blocks until
     done. A fixedMaskNode (labelmap) limits the fixed image to its nonzero region.
+    With masking or Dice guidance, harden any initial transform on the moving image
+    and its masks/segmentations before calling, rather than passing initialTransformNode.
     """
     import time
     from UniGradICONHelpers import remote
@@ -185,6 +208,12 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     parameters = self.createProcessParameters(parameterNode)
     parameters['outputSettings']['transform'] = outputTransformNode
     parameters['outputSettings']['volume'] = None
+    parameters['segmentationSettings']['propagate'] = False
+    from UniGradICONHelpers.segmentation import masking_mode
+    options = parameters['segmentationSettings']
+    if initialTransformNode is not None and (options['guidance'] or masking_mode(options) != "none"):
+      raise ValueError("For masking or Dice guidance, first apply and harden the initial transform on the moving image "
+                       "and its masks/segmentations, then register without an initialTransformNode.")
     temporaryNodes = []
     try:
       movingInput = movingVolumeNode
@@ -272,7 +301,28 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     parameters['generalSettings']['io_steps'] = int(paramNode.GetParameter(self.IO_PARAM))
     parameters['generalSettings']['device'] = str(paramNode.GetParameter(self.DEVICE_PARAM))
 
+    parameters['segmentationSettings'] = self.segmentationSettings(paramNode)
+
     return parameters
+
+  def segmentationSettings(self, node):
+    settings = {
+      "maskingMode": node.GetParameter("MaskingMode") or
+        ("input" if node.GetParameter("UseFixedSegmentMask") == "true" else "none"),
+      "guidance": node.GetParameter("UseSegmentationGuidance") == "true",
+      "propagate": node.GetParameter("PropagateSegmentation") == "true",
+      "weight": float(node.GetParameter("DiceLossWeight") or DEFAULT_DICE_WEIGHT),
+      "output": node.GetNodeReference(self.OUTPUT_SEGMENTATION_REF),
+    }
+    for role, reference in self.SEGMENTATION_REFS.items():
+      settings[role] = node.GetNodeReference(reference)
+    separate_inputs = node.GetParameter("SegmentationInputsVersion") in ("2", "3")
+    for role, reference in self.MASK_REFS.items():
+      source_role = role.removesuffix("Mask")
+      settings[role] = node.GetNodeReference(reference) if separate_inputs else settings[source_role]
+    settings["propagationSource"] = (node.GetNodeReference(self.PROPAGATION_REF)
+                                      if separate_inputs else settings["moving"])
+    return settings
 
   def itk2sitk(self, itk_image):
     import itk
@@ -429,8 +479,16 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       image.SetDirection(tuple((ijkToLPS[:3, :3] / spacing).flatten()))
     return image
 
+  def snapshotRegistrationInputs(self, image, options, fixedMask=None):
+    from .segmentation import snapshot_inputs
+    snapshots = {role: self.snapshotVolume(image[role]) for role in ("fixed", "moving")}
+    snapshot_inputs(snapshots, options)
+    if fixedMask is not None and "fixed_mask" not in snapshots:
+      snapshots["fixed_mask"] = self.snapshotVolume(fixedMask)
+    return snapshots
+
   def process(self, image, outputSettings, modelSettings=None, generalSettings=None, wait_for_completion=False, call_back=None,
-              fixedMask=None):
+              fixedMask=None, segmentationSettings=None):
     """Register in this Slicer, with the dictionaries createProcessParameters makes.
 
     :param image: fixed and moving volume nodes (or IDs) and their modalities ('modality-fixed', 'modality-moving')
@@ -440,18 +498,30 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     :param wait_for_completion: unused; the registration always runs to completion
     :param call_back: progress callback(total, step[, elapsed, remaining])
     :param fixedMask: optional labelmap that limits the fixed image to its nonzero region
+    :param segmentationSettings: optional dictionary from segmentationSettings(parameterNode),
+      with mask/guidance sources, flags and propagation output
     """
 
     import itk
-    import sitkUtils
     from UniGradICONHelpers import registration
 
     settings = self.registrationSettings(image, outputSettings, modelSettings, generalSettings)
-    model = registration.load_model(self.weights_location, settings["model"], settings["loss"], settings["device"])
-
-    fixed = self.sitk2itk(self.snapshotVolume(image['fixed']))
-    moving = self.sitk2itk(self.snapshotVolume(image['moving']))
-    fixed_mask = self.sitk2itk(self.snapshotVolume(fixedMask)) if fixedMask is not None else None
+    from UniGradICONHelpers.segmentation import masking_mode
+    options = segmentationSettings or {}
+    mode = masking_mode(options)
+    if (options.get("guidance") or mode == "loss") and settings["io_steps"] <= 0:
+      raise ValueError("Dice label matching and loss-function masking require at least one IO step.")
+    snapshots = self.snapshotRegistrationInputs(image, options, fixedMask)
+    weight = options.get("weight", 0) if options.get("guidance") else 0
+    extra = {"dice_loss_weight": weight} if weight else {}
+    if mode == "loss":
+      extra["loss_function_masking"] = True
+    model = registration.load_model(self.weights_location, settings["model"], settings["loss"], settings["device"], **extra)
+    fixed, moving = (self.sitk2itk(snapshots[role]) for role in ("fixed", "moving"))
+    guidance = {role: self.sitk2itk(snapshots[role]) for role in
+                ("fixed_mask", "moving_mask", "fixed_segmentation", "moving_segmentation") if role in snapshots}
+    if mode != "none":
+      guidance.update(input_masking=mode == "input", loss_function_masking=mode == "loss")
 
     def progress(*args):
       # a cancel request stops the registration at its next instance optimization step
@@ -465,7 +535,7 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
       call_back(io_steps, 0)
     phi_AB, warped_moving_image = registration.register_images(
       model, fixed, moving, settings["fixed_modality"], settings["moving_modality"], io_steps, progress,
-      warp=settings["warp"], fixed_mask=fixed_mask)
+      warp=settings["warp"], **guidance)
     if io_steps != 0 and call_back is not None:
       call_back(io_steps, io_steps)
 
@@ -473,8 +543,18 @@ class UniGradICONLogic(ScriptedLoadableModuleLogic):
     with tempfile.TemporaryDirectory(prefix="UniGradICON-results-", dir=slicer.app.temporaryPath) as directory:
       transformPath = os.path.join(directory, "transform.h5")
       itk.transformwrite([phi_AB], transformPath)
-      self.loadResults(outputSettings, transformPath,
-                       self.itk2sitk(warped_moving_image) if warped_moving_image is not None else None)
+      from .segmentation import load_results
+      propagated = None
+      if options.get("propagate"):
+        from UniGradICONHelpers.segmentation import propagate
+        labels = [value for key, value in snapshots.items() if key.startswith("propagation_")]
+        def check_cancelled():
+          if self.cancelRequested:
+            raise registration.RegistrationCancelled()
+        propagated = propagate(labels, snapshots["fixed"], transformPath, check_cancelled)
+      load_results(self, outputSettings, transformPath,
+                   self.itk2sitk(warped_moving_image) if warped_moving_image is not None else None,
+                   options, propagated)
 
 
 class RemoteRegistration:
@@ -510,18 +590,22 @@ class RemoteRegistration:
   def _uploadInputs(self):
     import tempfile
     self.workDir = tempfile.mkdtemp(prefix="UniGradICON-", dir=slicer.app.temporaryPath)
+    options = self.parameters.get("segmentationSettings") or {}
+    self.snapshots = self.logic.snapshotRegistrationInputs(self.parameters["image"], options, self.fixedMask)
     paths = {}
-    for role in ("fixed", "moving"):
-      paths[role] = os.path.join(self.workDir, f"{role}.nrrd")
-      sitk.WriteImage(self.logic.snapshotVolume(self.parameters["image"][role]), paths[role], True)
-    maskPath = None
-    if self.fixedMask is not None:
-      maskPath = os.path.join(self.workDir, "fixed_mask.nrrd")
-      sitk.WriteImage(self.logic.snapshotVolume(self.fixedMask), maskPath, True)
+    for role, image in self.snapshots.items():
+      paths[role] = os.path.join(self.workDir, role + ".nrrd")
+      sitk.WriteImage(image, paths[role], True)
     settings = self.logic.registrationSettings(
       self.parameters["image"], self.parameters["outputSettings"],
       self.parameters.get("modelSettings"), self.parameters["generalSettings"])
-    self.jobId = self.client.submit(paths["fixed"], paths["moving"], settings, maskPath)["id"]
+    from UniGradICONHelpers.segmentation import registration_options, require_server_features
+    additions = registration_options(options)
+    settings.update(additions)
+    if additions:
+      require_server_features(self.client.info(), settings)
+    uploads = {role + "_path": paths[role] for role in ("moving_mask", "fixed_segmentation", "moving_segmentation") if role in paths}
+    self.jobId = self.client.submit(paths["fixed"], paths["moving"], settings, paths.get("fixed_mask"), **uploads)["id"]
     self.timer.start()
 
   def poll(self):
@@ -545,7 +629,14 @@ class RemoteRegistration:
         if outputSettings.get("volume") is not None:
           warpedPath = self.client.download(self.jobId, "warped", os.path.join(self.workDir, "warped.nrrd"))
           warpedImage = sitk.ReadImage(warpedPath)
-        self.logic.loadResults(outputSettings, transformPath, warpedImage)
+        from .segmentation import load_results
+        options = self.parameters.get("segmentationSettings") or {}
+        propagated = None
+        if options.get("propagate"):
+          from UniGradICONHelpers.segmentation import propagate
+          labels = [value for key, value in self.snapshots.items() if key.startswith("propagation_")]
+          propagated = propagate(labels, self.snapshots["fixed"], transformPath, lambda: None)
+        load_results(self.logic, outputSettings, transformPath, warpedImage, options, propagated)
         self._finish(None)
       elif status["state"] == "failed":
         self._finish(status.get("error") or "unknown error")
@@ -581,6 +672,7 @@ class RemoteRegistration:
     import shutil
     from UniGradICONHelpers import remote
     self.timer.stop()
+    self.snapshots = None
     self.finished = True
     self.error = error
     self.cancelled = cancelled

@@ -1,5 +1,6 @@
 # Registration server without Slicer; install PyTorch for your GPU first (https://pytorch.org)
-icon_registration
+unigradicon==1.0.6
+icon_registration>=1.1.9
 itk
 fastapi
 uvicorn

@@ -97,6 +97,82 @@ def test_info_lists_devices_and_models():
   assert set(info["models"]) == set(registration.MODEL_WEIGHTS)
 
 
+def test_guidance_requires_labels_supported_backend_and_positive_io(monkeypatch):
+  monkeypatch.setattr(server, "guidance_available", lambda: True)
+  captured = []
+  def guided_register(**kwargs):
+    captured.append(kwargs)
+    assert Path(kwargs["fixed_segmentation_path"]).read_bytes() == b"FIXED_LABEL"
+    assert Path(kwargs["moving_segmentation_path"]).read_bytes() == b"MOVING_LABEL"
+    assert kwargs["dice_loss_weight"] == 0.25
+    return FakeRegistration()(**{key: value for key, value in kwargs.items()
+                               if key not in ("fixed_segmentation_path", "moving_segmentation_path", "dice_loss_weight")})
+  client = client_for(guided_register)
+  assert "segmentationGuidance" in client.get("/info").json()["features"]
+  params = dict(PARAMS, dice_loss_weight=0.25)
+  files = {"fixed": ("f.nrrd", b"FIXED"), "moving": ("m.nrrd", b"MOVING"),
+           "fixed_segmentation": ("f_seg.nrrd", b"FIXED_LABEL"),
+           "moving_segmentation": ("m_seg.nrrd", b"MOVING_LABEL")}
+  response = client.post("/jobs", files=files, data={"params": json.dumps(params)})
+  assert response.status_code == 200, response.text
+  assert wait_for(client, response.json()["id"], ("done", "failed"))["state"] == "done"
+  assert len(captured) == 1
+  without_moving = {key: value for key, value in files.items() if key != "moving_segmentation"}
+  assert client.post("/jobs", files=without_moving, data={"params": json.dumps(params)}).status_code == 400
+  assert client.post("/jobs", files=files, data={"params": json.dumps(dict(params, io_steps=0))}).status_code == 400
+  assert client.post("/jobs", files=files, data={"params": json.dumps(PARAMS)}).status_code == 400
+  monkeypatch.setattr(server, "guidance_available", lambda: False)
+  assert "segmentationGuidance" not in client.get("/info").json()["features"]
+  assert client.post("/jobs", files=files, data={"params": json.dumps(params)}).status_code == 400
+
+
+@pytest.mark.parametrize("weight", [-1, 101, True, None, "0.1", float("nan"), float("inf")])
+def test_invalid_dice_weight_is_rejected(weight):
+  from fastapi import HTTPException
+  with pytest.raises(HTTPException) as error:
+    server.validate_params(dict(PARAMS, dice_loss_weight=weight), ["CPU"])
+  assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("mode", ["input", "loss"])
+def test_masking_modes_validate_uploads_and_reach_worker(mode, monkeypatch):
+  monkeypatch.setattr(server, "loss_masking_available", lambda: True)
+  captured = []
+  def masked_register(**kwargs):
+    captured.append(kwargs)
+    assert Path(kwargs["fixed_mask_path"]).read_bytes() == b"FIXED_MASK"
+    assert Path(kwargs["moving_mask_path"]).read_bytes() == b"MOVING_MASK"
+    assert kwargs["input_masking"] == (mode == "input")
+    assert kwargs["loss_function_masking"] == (mode == "loss")
+    return FakeRegistration()(**{key: value for key, value in kwargs.items()
+                               if key not in ("moving_mask_path", "input_masking", "loss_function_masking")})
+  client = client_for(masked_register)
+  info = client.get("/info").json()
+  assert "inputMasking" in info["features"] and "lossFunctionMasking" in info["features"]
+  params = dict(PARAMS, input_masking=mode == "input", loss_function_masking=mode == "loss")
+  files = {"fixed": ("f.nrrd", b"FIXED"), "moving": ("m.nrrd", b"MOVING"),
+           "fixed_mask": ("f_mask.nrrd", b"FIXED_MASK"), "moving_mask": ("m_mask.nrrd", b"MOVING_MASK")}
+  response = client.post("/jobs", files=files, data={"params": json.dumps(params)})
+  assert response.status_code == 200, response.text
+  assert wait_for(client, response.json()["id"], ("done", "failed"))["state"] == "done"
+  assert len(captured) == 1
+  missing = {key: value for key, value in files.items() if key != "moving_mask"}
+  assert client.post("/jobs", files=missing, data={"params": json.dumps(params)}).status_code == 400
+  monkeypatch.setattr(server, "loss_masking_available", lambda: False)
+  if mode == "loss":
+    assert client.post("/jobs", files=files, data={"params": json.dumps(params)}).status_code == 400
+    assert client.post("/jobs", files=files, data={"params": json.dumps(dict(params, io_steps=0))}).status_code == 400
+
+
+@pytest.mark.parametrize("field", ["input_masking", "loss_function_masking"])
+@pytest.mark.parametrize("value", ["true", 1, [], {}])
+def test_masking_flags_are_strict_booleans(field, value):
+  from fastapi import HTTPException
+  with pytest.raises(HTTPException) as error:
+    server.validate_params(dict(PARAMS, **{field: value}), ["CPU"])
+  assert error.value.status_code == 400
+
+
 def test_job_runs_and_returns_results():
   fake = FakeRegistration()
   client = client_for(fake)
@@ -344,3 +420,14 @@ def test_io_steps_reject_non_integer_values(value):
 def test_invalid_choice_types_are_client_errors(name, value):
   response = submit(client_for(FakeRegistration()), dict(PARAMS, **{name: value}))
   assert response.status_code == 400
+
+
+def test_multilabel_feature_negotiation_and_parameter_validation(monkeypatch):
+  monkeypatch.setattr(server, "guidance_available", lambda: True)
+  info = client_for(FakeRegistration()).get("/info").json()
+  assert "multiLabelSegmentation" in info["features"]
+  values = dict(PARAMS, io_steps=1, dice_loss_weight=10, multilabel_segmentation=True)
+  assert server.validate_params(values, ["CPU"])["multilabel_segmentation"] is True
+  for flag, weight in [("yes", 10), (1, 10), (True, 0)]:
+    with pytest.raises(server.HTTPException, match="multilabel_segmentation"):
+      server.validate_params(dict(values, multilabel_segmentation=flag, dice_loss_weight=weight), ["CPU"])

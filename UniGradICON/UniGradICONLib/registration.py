@@ -32,6 +32,8 @@ class RegistrationControls:
       remote = self.ui.remoteProcessingCheckBox.checked
       if remote and not self.ui.serverComboBox.currentText.strip():
         raise ValueError("Enter a registration server address, or clear Remote processing to run locally.")
+      self.validateBackendReadiness()
+      self.clearInputPreview()
       if not self.prepareRunOutputs():
         return
       parameters = self.logic.createProcessParameters(self._parameterNode)
@@ -64,6 +66,7 @@ class RegistrationControls:
     qt.QTimer.singleShot(0, lambda: self._beginRegistration(parameters, remote, serial))
 
   def validateRunInputs(self):
+    self.validateSegmentationInputs()
     fixed = self.ui.fixedImageNodeComboBox.currentNode()
     moving = self.ui.movingImageNodeComboBox.currentNode()
     for role, node in (("fixed", fixed), ("moving", moving)):
@@ -82,18 +85,26 @@ class RegistrationControls:
       return False
     if node.IsA("vtkMRMLVolumeNode"):
       return node.GetImageData() is not None and node.GetImageData().GetNumberOfPoints() > 0
+    if node.IsA("vtkMRMLSegmentationNode"):
+      return node.GetSegmentation().GetNumberOfSegments() > 0
     return node.GetTransformToParent() is not None
 
   def selectedOutputsWithData(self):
     nodes = [self.ui.outputTransformComboBox.currentNode()]
     if self.ui.createVolumeCheckBox.checked:
       nodes.append(self.ui.outputVolumeComboBox.currentNode())
+    if self.ui.propagateSegmentationCheckBox.checked:
+      nodes.append(self.ui.outputSegmentationComboBox.currentNode())
     return [node for node in nodes if self.outputHasData(node)]
 
   def prepareRunOutputs(self):
     populated = self.selectedOutputsWithData()
-    self.ui.outputsCollapsibleButton.text = ("Outputs (transform + volume)" if self.ui.createVolumeCheckBox.checked
-                                             else "Outputs (transform only)")
+    outputs = ["transform"]
+    if self.ui.createVolumeCheckBox.checked:
+      outputs.append("volume")
+    if self.ui.propagateSegmentationCheckBox.checked:
+      outputs.append("segmentation")
+    self.ui.outputsCollapsibleButton.text = "Outputs (" + " + ".join(outputs) + ")"
     if populated:
       choice = self.confirmOutputReplacement(populated)
       if choice == "new":
@@ -123,7 +134,8 @@ class RegistrationControls:
     base = f"{moving.GetName()} to {fixed.GetName()}"
     for selector, nodeClass, suffix, wanted in (
         (self.ui.outputTransformComboBox, "vtkMRMLTransformNode", "transform", True),
-        (self.ui.outputVolumeComboBox, "vtkMRMLScalarVolumeNode", "registered", self.ui.createVolumeCheckBox.checked)):
+        (self.ui.outputVolumeComboBox, "vtkMRMLScalarVolumeNode", "registered", self.ui.createVolumeCheckBox.checked),
+        (self.ui.outputSegmentationComboBox, "vtkMRMLSegmentationNode", "segmentation", self.ui.propagateSegmentationCheckBox.checked)):
       if wanted and (replace or selector.currentNode() is None):
         node = slicer.mrmlScene.AddNewNodeByClass(nodeClass, slicer.mrmlScene.GenerateUniqueName(base + " " + suffix))
         selector.setCurrentNode(node)
@@ -147,15 +159,19 @@ class RegistrationControls:
       import importlib.util
       import tempfile
       from UniGradICONHelpers.task import RegistrationTask
-      if not remote and any(importlib.util.find_spec(name) is None for name in ("torch", "itk", "icon_registration")):
+      from UniGradICONHelpers.segmentation import backend_packages_current
+      if not remote and (self.logic._backendRestartRequired or not backend_packages_current()
+                         or any(importlib.util.find_spec(name) is None for name in ("torch", "itk", "icon_registration", "unigradicon"))):
         self.setRegistrationStatus("Setting up the local registration backend…")
         self.ensureLocalBackend()
       if not self._startingRegistration or serial != self._runSerial:
         return
       directory = tempfile.mkdtemp(prefix="UniGradICON-task-", dir=slicer.app.temporaryPath)
-      images = {role: self.logic.snapshotVolume(parameters["image"][role]) for role in ("fixed", "moving")}
+      images = self.logic.snapshotRegistrationInputs(parameters["image"], parameters["segmentationSettings"])
       settings = self.logic.registrationSettings(parameters["image"], parameters["outputSettings"],
                                                   parameters["modelSettings"], parameters["generalSettings"])
+      from UniGradICONHelpers.segmentation import registration_options
+      settings.update(registration_options(parameters["segmentationSettings"]))
       url = self.ui.serverComboBox.currentText.strip() if remote else None
       if remote:
         self.saveServerUrl(url)
@@ -225,10 +241,13 @@ class RegistrationControls:
         else:
           try:
             output = self._runParameters["outputSettings"]
-            for node in (output.get("transform"), output.get("volume")):
+            segmentation = self._runParameters["segmentationSettings"]
+            for node in (output.get("transform"), output.get("volume"), segmentation.get("output") if segmentation["propagate"] else None):
               if node is not None and node.GetScene() != slicer.mrmlScene:
                 raise ValueError("An output was removed. Create new outputs and run again.")
-            self.logic.loadResults(output, payload[0], payload[1])
+            from .segmentation import load_results
+            load_results(self.logic, output, payload[0], payload[1], segmentation,
+                         payload[2] if len(payload) == 3 else None)
             self._completedResult = self._runParameters
             self._finishRegistration()
           except Exception as error:
@@ -259,6 +278,9 @@ class RegistrationControls:
     else:
       elapsed = time.monotonic() - self._registrationStart
       message = f"Completed in {elapsed:.0f} s."
+      segmentation = self._completedResult.get("segmentationSettings", {})
+      if segmentation.get("propagate"):
+        message += f" Transformed segmentation: {segmentation['output'].GetName()}."
       if self._completedResult["outputSettings"].get("volume") is not None:
         message += " Click Compare result to inspect the registration."
         self.ui.comparisonCollapsibleButton.collapsed = False
@@ -279,6 +301,10 @@ class RegistrationControls:
 
   def updateRegistrationGUI(self):
     busy = self._registrationTask is not None or self._startingRegistration
+    self.updateSegmentationGUI(busy)
+    self.ui.comparisonSegmentationsCheckBox.visible = self.ui.comparisonModeComboBox.currentText == "Checkerboard"
+    self.updateInputPreviewGUI(busy)
+    backend_blocked = self.updateBackendStatus(busy)
     for widget in (self.ui.parameterNodeSelector, self.ui.InputsCollapsibleButton,
                    self.ui.generalSettingsCollapsibleButton, self.ui.outputsCollapsibleButton):
       widget.enabled = not busy
@@ -287,7 +313,10 @@ class RegistrationControls:
     if not busy and self._statusIsIdle:
       self.ui.registrationStatusLabel.text = ("Ready. Click Run registration." if inputs
                                                else "Select the fixed and moving images to begin.")
-    self.ui.runRegistrationButton.enabled = not self._cancelling and (busy or inputs)
+    mode = self.ui.maskingModeComboBox.itemData(self.ui.maskingModeComboBox.currentIndex)
+    io_valid = self.ui.ioSpinBox.value > 0 or not (self.ui.diceGuidanceCheckBox.checked or mode == "loss")
+    self.ui.runRegistrationButton.enabled = not self._cancelling and (busy or (inputs and not backend_blocked and io_valid))
+    self.ui.runRegistrationButton.toolTip = "Set IO steps above zero for IO guidance or loss masking." if not io_valid else ""
     self.ui.newOutputsButton.enabled = inputs and not busy
     self.ui.outputTransformComboBox.enabled = not busy
     self.ui.outputVolumeComboBox.enabled = self.ui.createVolumeCheckBox.checked and not busy
